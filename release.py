@@ -36,6 +36,28 @@ MODS = {
                        u'фильтр в поиске: #S, #A+, #лёгкий',
         'dirs': [],
     },
+    'gun_marks': {
+        'version_file': 'gun_marks/mod/mod_gun_marks.py',
+        'built': 'gun_marks/build/gun_marks_{version}.mtmod',
+        'name': u'Отметки на стволе',
+        'description': u'В бою: процент отметки, сколько урона нужно до следующего процента и '
+                       u'отметки, урон за бой. Расчёт появляется после двух боёв на танке',
+        'dirs': ['res_mods/{client}/mods/gun_marks_cache'],
+    },
+    'shell_cost': {
+        'version_file': 'shell_cost/mod/mod_shell_cost.py',
+        'built': 'shell_cost/build/shell_cost_{version}.mtmod',
+        'name': u'Серебро на снаряды',
+        'description': u'В бою: сколько серебра ушло на выстрелы',
+        'dirs': ['res_mods/{client}/mods/shell_cost_cache'],
+    },
+    'camera_zoom': {
+        'version_file': 'camera_zoom/mod/mod_camera_zoom.py',
+        'built': 'camera_zoom/build/camera_zoom_{version}.mtmod',
+        'name': u'Отдаление камеры',
+        'description': u'Камеру от третьего лица можно отодвинуть до 50 м вместо 25',
+        'dirs': [],
+    },
 }
 LAUNCHER = {
     'version_file': 'launcher/tanki_mods_launcher.py',
