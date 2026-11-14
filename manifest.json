@@ -8,6 +8,16 @@
     "version": "1.0.1"
   },
   "mods": {
+    "camera_zoom": {
+      "description": "Камеру от третьего лица можно отодвинуть до 50 м вместо 25",
+      "dirs": [],
+      "file": "camera_zoom_0.1.0.mtmod",
+      "name": "Отдаление камеры",
+      "sha256": "c70247a2901d70e50fe8ee54d3a8d687276f490c2405e6568dc91d13813c1ac3",
+      "size": 4362,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/camera_zoom-v0.1.0/camera_zoom_0.1.0.mtmod",
+      "version": "0.1.0"
+    },
     "gun_marks": {
       "description": "В бою: процент отметки, сколько урона нужно до следующего процента и отметки, урон за бой. Расчёт появляется после двух боёв на танке",
       "dirs": [
