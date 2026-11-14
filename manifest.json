@@ -8,6 +8,18 @@
     "version": "1.0.1"
   },
   "mods": {
+    "gun_marks": {
+      "description": "В бою: процент отметки, сколько урона нужно до следующего процента и отметки, урон за бой. Расчёт появляется после двух боёв на танке",
+      "dirs": [
+        "res_mods/{client}/mods/gun_marks_cache"
+      ],
+      "file": "gun_marks_0.1.0.mtmod",
+      "name": "Отметки на стволе",
+      "sha256": "c8ee765ed86ff9d1506535afff8af044ff19e8bd5111550bb76b1f64ee5d0c4c",
+      "size": 43016,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/gun_marks-v0.1.0/gun_marks_0.1.0.mtmod",
+      "version": "0.1.0"
+    },
     "nearyou_ranks": {
       "description": "Ранг и сложность танка из тир-листа Near_You в карусели ангара; фильтр в поиске: #S, #A+, #лёгкий",
       "dirs": [],
