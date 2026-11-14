@@ -33,12 +33,12 @@
     "nearyou_ranks": {
       "description": "Ранг и сложность танка из тир-листа Near_You в карусели ангара; фильтр в поиске: #S, #A+, #лёгкий",
       "dirs": [],
-      "file": "nearyou_ranks_0.3.1.mtmod",
+      "file": "nearyou_ranks_0.4.0.mtmod",
       "name": "Ранги Near_You",
-      "sha256": "5e57ab5a339d23c1be7636665f9e46dce3b872b91776c3bdb2bfa5fa3f42d82b",
-      "size": 48263,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/nearyou_ranks-v0.3.1/nearyou_ranks_0.3.1.mtmod",
-      "version": "0.3.1"
+      "sha256": "81dd125ae6f0faccbaa162ce34cbaaaa735fb6992b43a56ee8ee62bf99e41e22",
+      "size": 53724,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/nearyou_ranks-v0.4.0/nearyou_ranks_0.4.0.mtmod",
+      "version": "0.4.0"
     },
     "penmap": {
       "description": "Схема брони цели, раскрашенная под ваш снаряд, и шпаргалка по своему танку перед боем. Ctrl+Shift+P — настройки в ангаре",
