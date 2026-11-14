@@ -25,7 +25,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -43,6 +43,7 @@ DEFAULTS = {
     'random_style_when_unknown': True,
 }
 DELAY = 1.0   # seconds after the last event: a burst of syncs gives one step
+REQUEST_TIMEOUT = 30
 
 
 def log(*args):
@@ -101,6 +102,7 @@ class AutoStyle(object):
         self.saved_path = os.path.join(self.dir, 'saved.json')
         self.saved = _load(self.saved_path, {})    # str(intCD) -> {season: base64 outfit}
         self.busy = False
+        self.request_token = None
         self.timer = None
         self.skip = set()
         self.last_current = None
@@ -257,10 +259,24 @@ class AutoStyle(object):
         from gui.shared.gui_items.processors.common import OutfitApplier
         self.busy = True
         log('%s %s' % (kind, vehicle.userName))
+        token = object()
+        self.request_token = token
+
+        def timeout():
+            if self.request_token is token:
+                # no answer: do not wait forever, try again on the next event
+                self.request_token = None
+                self.busy = False
+                log('%s %s: no answer in %ds' % (kind, vehicle.userName, REQUEST_TIMEOUT))
+                self.kick()
 
         def callback(result):
+            if self.request_token is not token:
+                return
+            self.request_token = None
             self.busy = False
             ok = bool(getattr(result, 'success', False))
+            log('%s %s: %s' % (kind, vehicle.userName, 'done' if ok else 'failed'))
             if ok:
                 if done is not None:
                     done()
@@ -275,7 +291,9 @@ class AutoStyle(object):
                     else msg))
             self.kick()
 
-        OutfitApplier(vehicle, outfits).request(callback=callback)
+        BigWorld.callback(REQUEST_TIMEOUT, timeout)
+        # request() is adisp_async: it returns a caller, the request goes out when that is called
+        OutfitApplier(vehicle, outfits).request()(callback)
 
     @staticmethod
     def _notify(text):

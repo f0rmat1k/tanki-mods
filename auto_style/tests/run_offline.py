@@ -168,7 +168,12 @@ class OutfitApplier(object):
     def __init__(self, vehicle, outfits):
         self.vehicle, self.outfits = vehicle, outfits
 
-    def request(self, callback):
+    def request(self, callback=None):
+        # the game's Processor.request is adisp_async: the call only returns a caller
+        assert callback is None, 'the request must go out through the returned caller'
+        return self._send
+
+    def _send(self, callback):
         seasons = [s for _, s in self.outfits]
         assert sorted(seasons) == sorted(P.COMMON_SEASONS), seasons
         REQUESTS.append((self.vehicle.userName, [o.component.makeCompDescr() for o, _ in self.outfits]))
