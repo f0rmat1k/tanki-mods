@@ -15,7 +15,6 @@ How it works (auto_style_plan decides, this module talks to the game):
   is open; a failed request is not repeated until the selection changes.
 """
 import base64
-import copy
 import json
 import os
 import random
@@ -25,7 +24,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.2.1'
+__version__ = '0.3.0'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -103,6 +102,7 @@ class AutoStyle(object):
         self.saved = _load(self.saved_path, {})    # str(intCD) -> {season: base64 outfit}
         self.busy = False
         self.request_token = None
+        self.level_edit_ok = True
         self.timer = None
         self.skip = set()
         self.last_current = None
@@ -202,13 +202,6 @@ class AutoStyle(object):
                 mapping[(names[item_type], item_id)] = target
         return mapping
 
-    def template(self, vehicles):
-        """Camouflages and paints of the style as worn now: the player's own choice in its editor."""
-        for v in vehicles:
-            if plan_mod.wears(v, self.style_ids):
-                return dict((s, v.getOutfitComponent(s)) for s in plan_mod.COMMON_SEASONS)
-        return None
-
     # ---- the step ----
 
     def step(self):
@@ -246,16 +239,17 @@ class AutoStyle(object):
         free = style.fullInventoryCount(current_cd) if current is not None else 0
         if not self.cfg['restore']:
             vehicles = [v for v in vehicles if v.intCD == current_cd]
-        action = plan_mod.plan(current, vehicles, self.style_ids, mapping, bool(limit), free, self.skip)
+        action = plan_mod.plan(current, vehicles, self.style_ids,
+                               mapping if self.level_edit_ok else None, bool(limit), free, self.skip)
         if action is None:
             return
         kind, vehicle = action
         if kind == 'restore':
             self.restore(vehicle)
         else:
-            self.apply(vehicle, style, mapping, self.template(vehicles))
+            self.apply(vehicle, style, mapping if self.level_edit_ok else {})
 
-    def _request(self, kind, vehicle, outfits, done=None):
+    def _request(self, kind, vehicle, outfits, done=None, fallback=None):
         from gui.shared.gui_items.processors.common import OutfitApplier
         self.busy = True
         log('%s %s' % (kind, vehicle.userName))
@@ -280,6 +274,12 @@ class AutoStyle(object):
             if ok:
                 if done is not None:
                     done()
+            elif fallback is not None:
+                # the edited look (the level) was refused: the plain one, and no more edits
+                self.level_edit_ok = False
+                log('%s %s: trying the style without the level change' % (kind, vehicle.userName))
+                self._request(kind, vehicle, fallback, done)
+                return
             else:
                 self.skip.add((kind, vehicle.intCD))
                 msg = getattr(result, 'userMsg', '') or ''
@@ -303,8 +303,45 @@ class AutoStyle(object):
         except Exception:
             log('message not shown', traceback.format_exc())
 
-    def apply(self, vehicle, style, mapping, template):
+    def style_outfits(self, vehicle, style, mapping=None):
+        """The style as the customization screen puts it on: with the edits stored for this vehicle
+        on the server (getC11nOutfitsFromPool), fitted to the vehicle's regions when it is the
+        selected one; mapping changes camouflage / paint ids (the progression level) on top."""
         from vehicle_outfit.outfit import Outfit
+        veh_cd = vehicle.descriptor.makeCompactDescr()
+        diffs = {}
+        try:
+            for style_id, outfit_diffs in self.items_cache.items.inventory.getC11nOutfitsFromPool(
+                    vehicle.intCD) or ():
+                if style_id == style.id:
+                    diffs = dict(outfit_diffs)
+        except Exception:
+            log('stored style edits not read', traceback.format_exc())
+        regions = None
+        try:
+            from CurrentVehicle import g_currentVehicle
+            if g_currentVehicle.isPresent() and g_currentVehicle.item.intCD == vehicle.intCD:
+                from gui.impl.lobby.customization.shared import fitOutfit,                     getCurrentVehicleAvailableRegionsMap
+                regions = getCurrentVehicleAvailableRegionsMap()
+        except Exception:
+            log('regions not read', traceback.format_exc())
+            regions = None
+        outfits = []
+        for season in plan_mod.COMMON_SEASONS:
+            outfit = style.getOutfit(season, vehicleCD=veh_cd, diff=diffs.get(season))
+            if mapping:
+                comp = outfit.pack()
+                for c in comp.camouflages:
+                    c.id = mapping.get(('camo', c.id), c.id)
+                for p in comp.paints:
+                    p.id = mapping.get(('paint', p.id), p.id)
+                outfit = Outfit(component=comp, vehicleCD=veh_cd)
+            if regions is not None:
+                fitOutfit(outfit, regions)
+            outfits.append((outfit, season))
+        return outfits
+
+    def apply(self, vehicle, style, mapping):
         key = str(vehicle.intCD)
         if not plan_mod.wears(vehicle, self.style_ids) and key not in self.saved:
             self.saved[key] = dict(
@@ -312,21 +349,12 @@ class AutoStyle(object):
                  if vehicle.getOutfitComponent(s) is not None else '')
                 for s in plan_mod.COMMON_SEASONS)
             _save(self.saved_path, self.saved)
-        veh_cd = vehicle.descriptor.makeCompactDescr()
-        outfits = []
-        for season in plan_mod.COMMON_SEASONS:
-            comp = style.getOutfit(season, vehicleCD=veh_cd).pack()
-            own = template.get(season) if template else None
-            if own is not None and own.styleId == style.id:
-                # region masks of camouflage and paint are not vehicle-specific; decals are
-                comp.camouflages = copy.deepcopy(own.camouflages)
-                comp.paints = copy.deepcopy(own.paints)
-            for c in comp.camouflages:
-                c.id = mapping.get(('camo', c.id), c.id)
-            for p in comp.paints:
-                p.id = mapping.get(('paint', p.id), p.id)
-            outfits.append((Outfit(component=comp, vehicleCD=veh_cd), season))
-        self._request('apply', vehicle, outfits)
+        plain = self.style_outfits(vehicle, style)
+        edited = self.style_outfits(vehicle, style, mapping) if mapping else None
+        if edited is not None and [o.pack().makeCompDescr() for o, _ in edited] !=                 [o.pack().makeCompDescr() for o, _ in plain]:
+            self._request('apply', vehicle, edited, fallback=plain)
+        else:
+            self._request('apply', vehicle, plain)
 
     def spare_style(self, vehicle):
         try:
@@ -349,8 +377,7 @@ class AutoStyle(object):
             spare = self.spare_style(vehicle)
             if spare is not None:
                 log('%s: own look unknown, putting on style %s' % (vehicle.userName, spare.id))
-                outfits = [(spare.getOutfit(season, vehicleCD=veh_cd), season)
-                           for season in plan_mod.COMMON_SEASONS]
+                outfits = self.style_outfits(vehicle, spare)
                 self._request('restore', vehicle, outfits)
                 return
         for season in plan_mod.COMMON_SEASONS:
@@ -371,6 +398,52 @@ class AutoStyle(object):
 g_auto_style = None
 
 
+def _describe(descr):
+    """What an outfit request holds, for the log: style, camouflages, paints, decals."""
+    try:
+        from items.customizations import parseOutfitDescr
+        c = parseOutfitDescr(descr)
+        ids = lambda name: [x.id for x in getattr(c, name, ())]
+        return 'style=%s camo=%s paint=%s mods=%s decals=%d proj=%d diff=%s' % (
+            c.styleId, ids('camouflages'), ids('paints'), getattr(c, 'modifications', []),
+            len(getattr(c, 'decals', ())), len(getattr(c, 'projection_decals', ())),
+            base64.b64encode(descr))
+    except Exception:
+        return 'unparsed %s' % base64.b64encode(descr)
+
+
+def _log_outfit_requests():
+    """Every outfit request to the server, the game's own too, with the server's answer: to compare
+    what the customization screen sends with what the mod sends."""
+    from account_helpers.Shop import Shop
+    import AccountCommands
+    orig = Shop.buyAndEquipOutfit
+
+    def buy_and_equip(self, vehInvID, outfitData, callback=None):
+        try:
+            log('outfit request, vehicle %s: %s' % (vehInvID, '; '.join(
+                'season %s %s' % (season, _describe(d)) for d, season in outfitData)))
+            if getattr(self, '_Shop__ignore', True):
+                raise RuntimeError('shop ignores requests')
+            int_arr = [self._Shop__getCacheRevision(), vehInvID]
+            str_arr = []
+            for descr, season in outfitData:
+                int_arr.append(season)
+                str_arr.append(descr)
+
+            def proxy(requestID, resultID, errorStr, ext={}):
+                log('outfit answer: code %s %r' % (resultID, errorStr))
+                if callback is not None:
+                    callback(resultID)
+
+            account = self._Shop__account
+        except Exception:
+            return orig(self, vehInvID, outfitData, callback)
+        account._doCmdIntArrStrArr(AccountCommands.CMD_VEH_APPLY_OUTFIT, int_arr, str_arr, proxy)
+
+    Shop.buyAndEquipOutfit = buy_and_equip
+
+
 def init():
     global g_auto_style
     try:
@@ -378,6 +451,10 @@ def init():
         g_auto_style.subscribe()
     except Exception:
         log('init failed', traceback.format_exc())
+    try:
+        _log_outfit_requests()
+    except Exception:
+        log('requests not logged', traceback.format_exc())
 
 
 def fini():

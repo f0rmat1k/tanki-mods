@@ -177,8 +177,7 @@ class OutfitApplier(object):
         seasons = [s for _, s in self.outfits]
         assert sorted(seasons) == sorted(P.COMMON_SEASONS), seasons
         REQUESTS.append((self.vehicle.userName, [o.component.makeCompDescr() for o, _ in self.outfits]))
-        if FAIL:
-            FAIL.pop()
+        if FAIL and FAIL.pop(0):     # FAIL: per request in turn, true = the server refuses
             return callback(Obj(success=False, userMsg='server error'))
         for outfit, season in self.outfits:
             self.vehicle.outfits[season] = Comp.parse(outfit.component.makeCompDescr())
@@ -189,6 +188,13 @@ class Outfit(object):
     def __init__(self, strCompactDescr=None, component=None, vehicleCD=''):
         self.component = Comp.parse(strCompactDescr) if strCompactDescr else component
         self.vehicleCD = vehicleCD
+
+    def pack(self):
+        return Comp.parse(self.component.makeCompDescr())
+
+
+POOL = {}     # vehicle intCD -> [(style id, {season: diff})]: the edits the server keeps per vehicle
+FITS = []
 
 
 class Style(object):
@@ -206,9 +212,14 @@ class Style(object):
     def mayInstall(self, vehicle):
         return vehicle.userName != 'Type 59 Gold'
 
-    def getOutfit(self, season, vehicleCD=''):
-        # the style's base look: level-1 camouflage and a decal that fits only this vehicle
-        return Obj(pack=lambda: Comp(MARBLE, [31359], (), ['decal_' + vehicleCD]))
+    def getOutfit(self, season, vehicleCD='', diff=None):
+        # the style's base look: level-1 camouflage and a decal that fits only this vehicle; a
+        # stored edit (here: the whole look as a string) replaces camouflage and paint
+        comp = Comp(MARBLE, [31359], (), ['decal_' + vehicleCD])
+        if diff:
+            edit = Comp.parse(diff)
+            comp.camouflages, comp.paints = edit.camouflages, edit.paints
+        return Outfit(component=comp, vehicleCD=vehicleCD)
 
 
 TOKENS = {'tok': 4}
@@ -227,7 +238,8 @@ for name in ('skeletons', 'skeletons.gui', 'skeletons.gui.shared', 'skeletons.gu
     module(name)
 sys.modules['skeletons.gui.shared'].IItemsCache = lambda: Obj(
     isSynced=lambda: True, onSyncCompleted=items_sync,
-    items=Obj(getVehicles=lambda criteria: dict((v.intCD, v) for v in GARAGE)))
+    items=Obj(getVehicles=lambda criteria: dict((v.intCD, v) for v in GARAGE),
+              inventory=Obj(getC11nOutfitsFromPool=lambda cd: POOL.get(cd, []))))
 sys.modules['skeletons.gui.server_events'].IEventsCache = lambda: Obj(
     onSyncCompleted=events_sync, questsProgress=Obj(getTokenCount=lambda t: TOKENS[t]),
     getQuests=lambda: QUESTS, getHiddenQuests=lambda: {})
@@ -250,12 +262,42 @@ sys.modules['CurrentVehicle'].g_currentVehicle = type('CV', (object,), {
     'onChanged': on_changed, 'isPresent': lambda self: current.item is not None,
     'item': property(lambda self: current.item)})()
 module('gui.mods', auto_style_plan=P)
+for name in ('gui.impl', 'gui.impl.lobby', 'gui.impl.lobby.customization'):
+    module(name)
+module('gui.impl.lobby.customization.shared',
+       fitOutfit=lambda outfit, regions: FITS.append(outfit.vehicleCD),
+       getCurrentVehicleAvailableRegionsMap=lambda: {})
+sys.modules['items.customizations'].parseOutfitDescr = Comp.parse
+SENT = []
+
+
+class Shop(object):
+    _Shop__ignore = False
+
+    def __init__(self):
+        self._Shop__account = Obj(_doCmdIntArrStrArr=lambda cmd, ints, strs, proxy: (
+            SENT.append((cmd, ints, strs)), proxy(1, -1, 'NO_ITEM')))
+
+    def _Shop__getCacheRevision(self):
+        return 77
+
+    def buyAndEquipOutfit(self, vehInvID, outfitData, callback):
+        raise AssertionError('replaced by the logging one')
+
+
+module('account_helpers')
+module('account_helpers.Shop', Shop=Shop)
+module('AccountCommands', CMD_VEH_APPLY_OUTFIT=505)
 os.chdir(ROOT)
 import mod_auto_style  # noqa: E402
 mod_auto_style.init()
 mod = mod_auto_style.g_auto_style
 assert mod is not None
 assert os.path.isfile(os.path.join(ROOT, 'mods', 'configs', 'auto_style', 'auto_style.json'))
+# outfit requests are logged and still go out the game's way, with the answer passed on
+ANSWERS = []
+Shop().buyAndEquipOutfit(5, [('31387|31362||', 1)], ANSWERS.append)
+assert SENT == [(505, [77, 5, 1], ['31387|31362||'])] and ANSWERS == [-1], (SENT, ANSWERS)
 
 is7 = Veh(10, 'IS-7', Comp(777, [5], [6]))     # its own style
 t62 = Veh(11, 'T-62A')                           # nothing on it
@@ -271,7 +313,7 @@ def select(v):
 
 
 class SpareStyle(Spare):
-    def getOutfit(self, season, vehicleCD=''):
+    def getOutfit(self, season, vehicleCD='', diff=None):
         return Outfit(component=Comp(self.id, [self.id + 1]), vehicleCD=vehicleCD)
 
 
@@ -300,10 +342,14 @@ t62.isLocked = False
 items_sync()
 run_callbacks()
 assert REQUESTS[-1] == ('T-62A', ['0|||'] * 3) and not P.wears(t62, STYLES)
-# the player's choice in the style editor (a paint) is kept, the camouflage goes to level 4
+# the edit kept on the server for this vehicle (a paint) stays, the camouflage goes to level 4;
+# the selected vehicle's outfit is fitted to its regions as the customization screen does
+POOL[t62.intCD] = [(MARBLE, dict((s, '31387|31360|99|') for s in P.COMMON_SEASONS))]
 t62.outfits = dict((s, Comp(MARBLE, [31360], [99])) for s in P.COMMON_SEASONS)
+del FITS[:]
 select(t62)
 assert REQUESTS[-1] == ('T-62A', ['31387|31362|99|decal_cd11'] * 3), REQUESTS[-1]
+assert FITS and set(FITS) == set(['cd11']), FITS
 assert str(t62.intCD) not in mod.saved, 'it wore the style already: nothing of its own to save'
 # weekly limit reached: a vehicle with a skin of its own keeps it, a bare one still gets the style
 QUESTS['marble_gold'] = Obj(_data={'conditions': {'customization': {'styleId': MARBLE}}},
@@ -328,6 +374,19 @@ assert len(REQUESTS) == count + 1, 'retried'
 select(t62)
 select(is7)
 assert P.wears(is7, STYLES)
+# the server refuses the level change: the plain style goes on, no message, no more level changes
+select(t62)
+FAIL[:] = [0, 1]     # taking it off T-62A works, the level-4 look on IS-7 is refused
+count, messages = len(REQUESTS), len(MESSAGES)
+select(is7)
+assert [r[0] for r in REQUESTS[count:]] == ['T-62A', 'IS-7', 'IS-7'], REQUESTS[count:]
+assert REQUESTS[-2][1] == ['31387|31362||decal_cd10'] * 3, REQUESTS[-2]
+assert REQUESTS[-1][1] == ['31387|31359||decal_cd10'] * 3, REQUESTS[-1]
+assert P.wears(is7, STYLES) and len(MESSAGES) == messages and not mod.level_edit_ok
+count = len(REQUESTS)
+items_sync()
+run_callbacks()
+assert len(REQUESTS) == count, 'level-1 look must not be re-applied again and again'
 print('mod: ok')
 os.chdir(HERE)
 shutil.rmtree(TEMP)
