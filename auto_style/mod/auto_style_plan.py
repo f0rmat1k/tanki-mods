@@ -94,17 +94,29 @@ def level_mapping(groups, target_level=None):
     return mapping
 
 
+def _names_style(value, style_ids):
+    """A styleId value: one id or, as the game's quest data has it, a list of them."""
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+    for v in values:
+        try:
+            if int(v) in style_ids:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
 def find_style_ids(data, style_ids):
     """True when quest data mentions one of style_ids as a styleId (its customization condition)."""
     stack = [data]
     while stack:
         x = stack.pop()
         if isinstance(x, dict):
-            if x.get('styleId') in style_ids:
+            if 'styleId' in x and _names_style(x['styleId'], style_ids):
                 return True
             stack.extend(x.items())
         elif isinstance(x, (list, tuple)):
-            if len(x) == 2 and x[0] == 'styleId' and x[1] in style_ids:
+            if len(x) == 2 and x[0] == 'styleId' and _names_style(x[1], style_ids):
                 return True
             stack.extend(x)
     return False

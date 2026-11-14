@@ -100,6 +100,10 @@ assert P.find_style_ids({'conditions': [('preBattle', [('vehicle', [('customizat
     ('styleId', MARBLE)])])])]}, STYLES)
 assert P.find_style_ids({'a': {'customization': {'styleId': MARBLE}}}, STYLES)
 assert not P.find_style_ids({'a': [('styleId', 1)]}, STYLES)
+# the game's quest data has the ids as a list
+assert P.find_style_ids({'customization': {'styleId': [MARBLE]}}, STYLES)
+assert P.find_style_ids([('styleId', [1, MARBLE])], STYLES)
+assert not P.find_style_ids({'styleId': [1, 2], 'x': {'styleId': ['a']}}, STYLES)
 print('plan: ok')
 
 

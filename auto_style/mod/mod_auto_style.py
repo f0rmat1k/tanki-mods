@@ -24,7 +24,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -230,7 +230,13 @@ class AutoStyle(object):
             log('style %s: %s copies, level items %s, worn by %s' % info)
         if current is not None and not style.mayInstall(current):
             current = None
-        limit = self.limit_reached() if self.cfg['respect_own_skin_after_limit'] else None
+        limit = None
+        if self.cfg['respect_own_skin_after_limit']:
+            try:
+                limit = self.limit_reached()
+            except Exception:
+                # the quest data is the least certain part: without it the style still goes on
+                log('weekly limit not read', traceback.format_exc())
         free = style.fullInventoryCount(current_cd) if current is not None else 0
         if not self.cfg['restore']:
             vehicles = [v for v in vehicles if v.intCD == current_cd]
