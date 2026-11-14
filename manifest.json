@@ -1,4 +1,12 @@
 {
+  "launcher": {
+    "file": "tanki-mods-launcher.exe",
+    "page": "https://github.com/f0rmat1k/tanki-mods/releases/tag/launcher-v1.0.0",
+    "sha256": "80ed8ebe2a9c9dc57cf36a27d41c4ef0f732b1e03af570e0550b315eeb3d997b",
+    "size": 11250749,
+    "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/launcher-v1.0.0/tanki-mods-launcher.exe",
+    "version": "1.0.0"
+  },
   "mods": {
     "nearyou_ranks": {
       "description": "Ранг и сложность танка из тир-листа Near_You в карусели ангара; фильтр в поиске: #S, #A+, #лёгкий",
