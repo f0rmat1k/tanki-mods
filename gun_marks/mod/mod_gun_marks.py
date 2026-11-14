@@ -19,17 +19,20 @@ from PlayerEvents import g_playerEvents
 from gui.mods import gun_marks_calc as calc
 from gui.mods import gun_marks_label as label
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 MOD_ID = 'gun_marks'
 CONFIG_DIR = os.path.join('mods', 'configs', MOD_ID)
 DEFAULTS = {
     'enabled': True,
-    'anchor': 'top',        # 'top' or 'bottom' of the screen, centered horizontally
-    'offset_x': 0,
-    'offset_y': 64,
+    # top / bottom (centered), top_left / top_right / bottom_left / bottom_right (corners)
+    'anchor': 'top_right',
+    'offset_x': 8,          # corners: the gap to the side edge; top / bottom: shift right
+    'offset_y': 8,          # the gap to the top or bottom edge
     'min_level': 5,         # marks exist from tier V
 }
+# 0.1.0 put the panel under the score, where other mods' text overlaps it
+OLD_POSITION = {'anchor': 'top', 'offset_x': 0, 'offset_y': 64}
 FONT = 'mods/%s/font.bin' % MOD_ID
 WHITE, GRAY, GOLD, GREEN = (235, 230, 215), (160, 156, 148), (250, 200, 70), (120, 210, 120)
 
@@ -87,9 +90,16 @@ class GunMarks(object):
         self.dir = os.path.join(self.root, CONFIG_DIR)
         path = os.path.join(self.dir, 'gun_marks.json')
         self.cfg = dict(DEFAULTS)
-        self.cfg.update(_read_json(path, {}))
-        if not os.path.isfile(path):
-            _write_json(path, DEFAULTS)
+        saved = _read_json(path, {})
+        if all(saved.get(k) == v for k, v in OLD_POSITION.items()):
+            for k in OLD_POSITION:
+                del saved[k]
+            self.cfg.update(saved)
+            _write_json(path, self.cfg)
+        else:
+            self.cfg.update(saved)
+            if not os.path.isfile(path):
+                _write_json(path, DEFAULTS)
         self.history_path = os.path.join(self.dir, 'history.json')
         # str(intCD) -> {'avg', 'percent', 'marks', 'history': [[avg, percent], ...]}
         self.data = _read_json(self.history_path, {})

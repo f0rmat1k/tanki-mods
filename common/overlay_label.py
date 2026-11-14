@@ -79,8 +79,29 @@ def render(font, lines):
     return png_rgba(w, h, px), w, h
 
 
+ANCHORS = ('top', 'bottom', 'top_left', 'top_right', 'bottom_left', 'bottom_right')
+
+
+def place(anchor, offset_x, offset_y, w, h, sw, sh):
+    """Top-left pixel of a w x h block on a sw x sh screen.
+
+    'top' / 'bottom': centered horizontally, offset_x shifts it right; the corner anchors: offset_x
+    is the gap to the left or right edge. offset_y is the gap to the top or bottom edge.
+    """
+    if anchor not in ANCHORS:
+        anchor = 'top'
+    if anchor.endswith('_left'):
+        x = offset_x
+    elif anchor.endswith('_right'):
+        x = sw - w - offset_x
+    else:
+        x = sw / 2.0 - w / 2.0 + offset_x
+    y = offset_y if anchor.startswith('top') else sh - h - offset_y
+    return float(x), float(y)
+
+
 class Label(object):
-    """One block of text at a fixed place: anchor 'top' (centered horizontally) or 'bottom'."""
+    """One block of text at a fixed place: see place() for the anchors."""
 
     def __init__(self, name, cache_dir, cache_vfs, font, log):
         self.name, self.cache_dir, self.cache_vfs = name, cache_dir, cache_vfs
@@ -119,8 +140,7 @@ class Label(object):
         else:
             self.comp.textureName = tex
         sw, sh = GUI.screenResolution()[:2]
-        x = sw / 2.0 - w / 2.0 + offset_x
-        y = offset_y if anchor == 'top' else sh - h - offset_y
+        x, y = place(anchor, offset_x, offset_y, w, h, sw, sh)
         x = min(max(0.0, x), max(0.0, sw - w))
         y = min(max(0.0, y), max(0.0, sh - h))
         self.comp.position = (x / sw * 2.0 - 1.0, 1.0 - y / sh * 2.0, 1.0)

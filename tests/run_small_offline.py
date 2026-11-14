@@ -225,9 +225,24 @@ VEH = 7937281
 DOSSIER = {'damageRating': 7235, 'movingAvgDamage': 3100, 'marksOnGun': 2}
 DOSSIERS[VEH] = Obj(getRecordValue=lambda block, name: DOSSIER[name])
 VEHICLES = [Obj(intCD=VEH, level=10, shells=VEHICLES[0].shells)]
+# the label anchors: centered, corners
+assert overlay_label.place('top', 0, 64, 200, 50, 1920, 1080) == (860.0, 64.0)
+assert overlay_label.place('top_right', 8, 8, 200, 50, 1920, 1080) == (1712.0, 8.0)
+assert overlay_label.place('bottom_left', 8, 8, 200, 50, 1920, 1080) == (8.0, 1022.0)
+assert overlay_label.place('nonsense', 0, 0, 200, 50, 1920, 1080) == (860.0, 0.0)
+# a 0.1.0 config with the old place under the score moves to the corner, other keys stay
+GM_CFG = os.path.join('mods', 'configs', 'gun_marks', 'gun_marks.json')
+if not os.path.isdir(os.path.dirname(GM_CFG)):
+    os.makedirs(os.path.dirname(GM_CFG))
+with open(GM_CFG, 'w') as f:
+    json.dump({'enabled': True, 'anchor': 'top', 'offset_x': 0, 'offset_y': 64, 'min_level': 6}, f)
 import mod_gun_marks  # noqa: E402
 mod_gun_marks.init()
 gm = mod_gun_marks.g_mod
+assert (gm.cfg['anchor'], gm.cfg['min_level']) == ('top_right', 6), gm.cfg
+with open(GM_CFG) as f:
+    assert json.load(f)['anchor'] == 'top_right'
+gm.cfg['min_level'] = 5
 EVENTS.onAccountShowGUI()
 eff = Obj(onTotalEfficiencyUpdated=Event())
 PLAYER['p'] = Obj(playerVehicleID=1, guiSessionProvider=Obj(shared=Obj(ammo=ammo, personalEfficiencyCtrl=eff)),
