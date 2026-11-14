@@ -11,12 +11,12 @@
     "auto_style": {
       "description": "Выбранный в ангаре танк сам надевает «Благородный мрамор» (золото за победы) последнего открытого уровня; танк, с которого стиль ушёл, получает свой внешний вид обратно. После недельного лимита золота танки со своим стилем или камуфляжем не трогаются",
       "dirs": [],
-      "file": "auto_style_0.3.4.mtmod",
+      "file": "auto_style_0.3.5.mtmod",
       "name": "Автостиль «Благородный мрамор»",
-      "sha256": "071ad825d641dabcf03f270acfa936bb0ef672269b5e18b444dde5b232997b06",
-      "size": 29405,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/auto_style-v0.3.4/auto_style_0.3.4.mtmod",
-      "version": "0.3.4"
+      "sha256": "35e7d66ab01136524dbb0baf155ef8f9fbf62daa31474c61f1efdb992c95f6a4",
+      "size": 31127,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/auto_style-v0.3.5/auto_style_0.3.5.mtmod",
+      "version": "0.3.5"
     },
     "camera_zoom": {
       "description": "Камеру от третьего лица можно отодвинуть до 50 м вместо 25",
