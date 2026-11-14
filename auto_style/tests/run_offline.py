@@ -359,6 +359,26 @@ for spares, fail in (([DecalSpare(960)], []), ([SpareStyle(950)], [1])):
 SPARE_STYLES[:] = []
 mod.saved.clear()
 select(is7)
+# the saved look is a style the server refuses as saved (its decals): the style rebuilt for the
+# vehicle goes on instead, and the marble moves on
+SPARE_STYLES[:] = [SpareStyle(950)]
+own950 = dict((x, Comp(950, [951], (), ['many_decals'])) for x in P.COMMON_SEASONS)
+turtle = Veh(13, 'Turtle Mk. I', Comp(MARBLE, [31362]))
+mod.saved[str(turtle.intCD)] = dict((str(x), base64.b64encode(c.makeCompDescr()))
+                                    for x, c in own950.items())
+GARAGE.append(turtle)
+mod_auto_style.g_auto_style.c11n.getItemByID = lambda t, i: (Style() if i == MARBLE else
+                                                             SpareStyle(950) if i == 950 else None)
+FAIL[:] = [0, 1]     # IS-7 gets its look back, Turtle's saved one is refused
+count = len(REQUESTS)
+select(t62)
+assert [r[0] for r in REQUESTS[count:]] == ['IS-7', 'Turtle Mk. I', 'Turtle Mk. I', 'T-62A'],     REQUESTS[count:]
+assert REQUESTS[count + 1][1] == ['950|951||many_decals'] * 3
+assert turtle.outfits[1].makeCompDescr() == '950|951||' and P.wears(t62, STYLES)
+assert str(turtle.intCD) not in mod.saved
+GARAGE.remove(turtle)
+SPARE_STYLES[:] = []
+select(is7)
 
 
 assert REQUESTS[-1] == ('IS-7', ['31387|31362||decal_cd10'] * 3), REQUESTS
@@ -412,14 +432,14 @@ select(t62)
 assert REQUESTS[-1][0] == 'T-62A' and P.wears(t62, STYLES)
 # a failed request is not repeated until the selection changes, and is reported once
 QUESTS.clear()
-FAIL.append(1)
+FAIL[:] = [1, 1]     # its own look and then no style at all are both refused
 count = len(REQUESTS)
 select(is7)          # taking it off T-62A fails: IS-7 waits, as the only copy is still on T-62A
 assert not P.wears(is7, STYLES) and P.wears(t62, STYLES) and len(MESSAGES) == 1, MESSAGES
-assert len(REQUESTS) == count + 1
+assert len(REQUESTS) == count + 2
 items_sync()
 run_callbacks()
-assert len(REQUESTS) == count + 1, 'retried'
+assert len(REQUESTS) == count + 2, 'retried'
 select(t62)
 select(is7)
 assert P.wears(is7, STYLES)

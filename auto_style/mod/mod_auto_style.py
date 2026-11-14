@@ -24,7 +24,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -249,7 +249,7 @@ class AutoStyle(object):
         else:
             self.apply(vehicle, style, mapping if self.level_edit_ok else {})
 
-    def _request(self, kind, vehicle, outfits, done=None, fallback=None):
+    def _request(self, kind, vehicle, outfits, done=None, fallbacks=()):
         from gui.shared.gui_items.processors.common import OutfitApplier
         self.busy = True
         log('%s %s' % (kind, vehicle.userName))
@@ -277,12 +277,12 @@ class AutoStyle(object):
                 self.skip.add((kind, vehicle.intCD))
                 if done is not None:
                     done()
-            elif fallback is not None:
+            elif fallbacks:
                 # refused: the plain look instead; for the marble, no more level edits
                 if kind == 'apply':
                     self.level_edit_ok = False
                 log('%s %s: trying the plain look' % (kind, vehicle.userName))
-                self._request(kind, vehicle, fallback, done)
+                self._request(kind, vehicle, fallbacks[0], done, fallbacks[1:])
                 return
             else:
                 self.skip.add((kind, vehicle.intCD))
@@ -356,7 +356,7 @@ class AutoStyle(object):
         plain = self.style_outfits(vehicle, style)
         edited = self.style_outfits(vehicle, style, mapping) if mapping else None
         if edited is not None and [o.pack().makeCompDescr() for o, _ in edited] !=                 [o.pack().makeCompDescr() for o, _ in plain]:
-            self._request('apply', vehicle, edited, fallback=plain)
+            self._request('apply', vehicle, edited, fallbacks=[plain])
         else:
             self._request('apply', vehicle, plain)
 
@@ -375,34 +375,51 @@ class AutoStyle(object):
         return random.choice(spare) if spare else None
 
     def restore(self, vehicle):
+        """Put the vehicle's own look back, and if the server refuses that, simpler ones: the
+        marble must come off in any case, or the next vehicle cannot get it."""
         from vehicle_outfit.outfit import Outfit
         from items.customizations import CustomizationOutfit
         key = str(vehicle.intCD)
-        own = self.saved.get(key, {})
+        own = self.saved.get(key)
         veh_cd = vehicle.descriptor.makeCompactDescr()
-        outfits = []
-        spare = None
-        if key not in self.saved and self.cfg['random_style_when_unknown']:
+        bare = [(Outfit(component=CustomizationOutfit(), vehicleCD=veh_cd), season)
+                for season in plan_mod.COMMON_SEASONS]
+        tries = []
+        if own:
+            saved = [(Outfit(strCompactDescr=base64.b64decode(own[str(season)]), vehicleCD=veh_cd)
+                      if own.get(str(season)) else
+                      Outfit(component=CustomizationOutfit(), vehicleCD=veh_cd), season)
+                     for season in plan_mod.COMMON_SEASONS]
+            tries.append(saved)
+            # a style saved with its decals can be refused (too many projection decals): the same
+            # style as the game builds it for this vehicle
+            style = self._style_of(saved)
+            if style is not None:
+                tries.append(self.style_outfits(vehicle, style))
+        elif self.cfg['random_style_when_unknown']:
             # the marble was on it before the mod: its own look is not known, give it some style
             spare = self.spare_style(vehicle)
-        for season in plan_mod.COMMON_SEASONS:
-            packed = own.get(str(season))
-            if packed:
-                outfit = Outfit(strCompactDescr=base64.b64decode(packed), vehicleCD=veh_cd)
-            else:
-                outfit = Outfit(component=CustomizationOutfit(), vehicleCD=veh_cd)
-            outfits.append((outfit, season))
+            if spare is not None:
+                log('%s: own look unknown, putting on style %s' % (vehicle.userName, spare.id))
+                tries.append(self.style_outfits(vehicle, spare))
+        tries.append(bare)
 
         def done():
             if self.saved.pop(key, None) is not None:
                 _save(self.saved_path, self.saved)
 
-        if spare is not None:
-            log('%s: own look unknown, putting on style %s' % (vehicle.userName, spare.id))
-            # if the server refuses it, the vehicle is left without a style
-            self._request('restore', vehicle, self.style_outfits(vehicle, spare), fallback=outfits)
-            return
-        self._request('restore', vehicle, outfits, done)
+        self._request('restore', vehicle, tries[0], done, tries[1:])
+
+    def _style_of(self, outfits):
+        for outfit, _ in outfits:
+            style_id = outfit.pack().styleId
+            if style_id and style_id not in self.style_ids:
+                try:
+                    return self.c11n.getItemByID(self._gui_type('STYLE'), style_id)
+                except Exception:
+                    log('style %s not found' % style_id, traceback.format_exc())
+                return None
+        return None
 
 
 g_auto_style = None
