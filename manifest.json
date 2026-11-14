@@ -63,6 +63,20 @@
       "size": 37901,
       "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/shell_cost-v0.1.0/shell_cost_0.1.0.mtmod",
       "version": "0.1.0"
+    },
+    "xvm": {
+      "description": "Оленемер, расширенные маркеры, карусель и многое другое.",
+      "file": "xvm_14.0.0_0004_master_ae00c2ff8f87aae7cb8e2571e2d124a7ce307098.zip",
+      "kind": "zip",
+      "name": "XVM",
+      "package": "com.modxvm.xvm",
+      "page": "https://modxvm.com/ru/%D1%81%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C-xvm/",
+      "sha256": "8335f9c8c4f83b46f5e8d1649fd6d081dac0329e73edbee8d00c6210b8dc8673",
+      "size": 26018440,
+      "source": "modxvm.com",
+      "url": "https://nightly.modxvm.com/download/master/xvm_14.0.0_0004_master_ae00c2ff8f87aae7cb8e2571e2d124a7ce307098.zip",
+      "version": "14.0.0.0004",
+      "zip_root": "lesta"
     }
   },
   "schema": 1
