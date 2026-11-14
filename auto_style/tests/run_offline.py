@@ -205,8 +205,8 @@ FITS = []
 class Style(object):
     id = MARBLE
     descriptor = Obj(questsProgression=Obj(
-        getGroupTokens=lambda: ['tok'], getItemsForGroup=lambda t: levels,
-        getUnlocks=lambda t, n: levels[:n + 1]))
+        getGroupTokens=lambda: ['tok'], getItemsForGroup=lambda t: STYLE_LEVELS,
+        getUnlocks=lambda t, n: STYLE_LEVELS[:n + 1]))
 
     def fullCount(self):
         return 1
@@ -228,6 +228,8 @@ class Style(object):
 
 
 TOKENS = {'tok': 4}
+# as in the game: each level has a camouflage and a paint, with the same ids
+STYLE_LEVELS = [{}] + [{1: [i], 2: [i]} for i in (31359, 31360, 31361, 31362)]
 QUESTS = {}
 MESSAGES = []
 current = Obj(item=None)
@@ -413,10 +415,10 @@ assert len(REQUESTS) == count, 'it wears the style: nothing to send'
 assert str(t62.intCD) not in mod.saved, 'it wore the style already: nothing of its own to save'
 # a vehicle with an edit stored on the server gets it, with the camouflage at level 4, fitted
 bare2 = Veh(14, 'bare2')
-POOL[bare2.intCD] = [(MARBLE, dict((s, '31387|31360|99|') for s in P.COMMON_SEASONS))]
+POOL[bare2.intCD] = [(MARBLE, dict((s, '31387|31360|31359|') for s in P.COMMON_SEASONS))]
 GARAGE.append(bare2)
 select(bare2)
-assert REQUESTS[-2][0] == 'T-62A' and REQUESTS[-1] == ('bare2', ['31387|31362|99|decal_cd14'] * 3),     REQUESTS[-2:]
+assert REQUESTS[-2][0] == 'T-62A' and REQUESTS[-1] == ('bare2', ['31387|31362|31359|decal_cd14'] * 3),     REQUESTS[-2:]
 assert FITS and set(FITS) == set(['cd14']), FITS
 select(t62)
 GARAGE.remove(bare2)

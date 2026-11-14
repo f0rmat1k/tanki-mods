@@ -24,7 +24,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.3.2'
+__version__ = '0.3.3'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -194,7 +194,9 @@ class AutoStyle(object):
         for token in qprog.getGroupTokens():
             count = self.events_cache.questsProgress.getTokenCount(token)
             groups.append((qprog.getItemsForGroup(token), qprog.getUnlocks(token, count)))
-        names = {CustomizationType.CAMOUFLAGE: 'camo', CustomizationType.PAINT: 'paint'}
+        # the level is the camouflage: the server refused a paint changed along with it ('paint
+        # 31359 is not installable in editable style 31387'; paints and camouflages share ids)
+        names = {CustomizationType.CAMOUFLAGE: 'camo'}
         mapping = {}
         for (item_type, item_id), target in plan_mod.level_mapping(
                 groups, int(self.cfg['level'] or 0)).items():
