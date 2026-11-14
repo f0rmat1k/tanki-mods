@@ -25,7 +25,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.3.4'
+__version__ = '0.3.5'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -244,6 +244,9 @@ class AutoStyle(object):
             vehicles = [v for v in vehicles if v.intCD == current_cd]
         action = plan_mod.plan(current, vehicles, self.style_ids,
                                None, bool(limit), free, self.skip)
+        if action is None and current is not None and self.level_edit_ok and mapping                 and not current.isLocked and ('apply', current_cd) not in self.skip                 and plan_mod.wears(current, self.style_ids)                 and not self.has_level(current, style, mapping):
+            # it wears the marble, but the edit kept for it is not at the level: once per selection
+            action = ('apply', current)
         if action is None:
             return
         kind, vehicle = action
@@ -310,20 +313,13 @@ class AutoStyle(object):
         except Exception:
             log('message not shown', traceback.format_exc())
 
-    def style_outfits(self, vehicle, style, mapping=None):
+    def style_outfits(self, vehicle, style, mapping=None, stored=True):
         """The style as the customization screen puts it on: with the edits stored for this vehicle
         on the server (getC11nOutfitsFromPool), fitted to the vehicle's regions when it is the
-        selected one; mapping changes camouflage / paint ids (the progression level) on top."""
-        from vehicle_outfit.outfit import Outfit
+        selected one. With mapping (the progression level) the stored edits are replaced by one
+        that holds only the camouflage at that level."""
         veh_cd = vehicle.descriptor.makeCompactDescr()
-        diffs = {}
-        try:
-            for style_id, outfit_diffs in self.items_cache.items.inventory.getC11nOutfitsFromPool(
-                    vehicle.intCD) or ():
-                if style_id == style.id:
-                    diffs = dict(outfit_diffs)
-        except Exception:
-            log('stored style edits not read', traceback.format_exc())
+        diffs = self.stored_edits(vehicle, style) if stored else {}
         regions = None
         try:
             from CurrentVehicle import g_currentVehicle
@@ -335,22 +331,50 @@ class AutoStyle(object):
             regions = None
         outfits = []
         for season in plan_mod.COMMON_SEASONS:
-            outfit = style.getOutfit(season, vehicleCD=veh_cd, diff=diffs.get(season))
+            outfit = None
             if mapping:
-                comp = outfit.pack()
-                if not comp.camouflages:
-                    # an outfit built by the game for a vehicle without stored edits leaves the
-                    # camouflage to the style: take the style's own one, to set its level
-                    comp.camouflages = self._style_camouflages(style, season)
-                for c in comp.camouflages:
+                # the level as the server took it on Turtle Mk. I: an edit holding only the style
+                # and its camouflage at that level. The vehicle's stored edits are left out: one
+                # of them brought a paint the server refuses ('not installable in editable style')
+                camos = self._style_camouflages(style, season)
+                for c in camos:
                     c.id = mapping.get(('camo', c.id), c.id)
-                for p in comp.paints:
-                    p.id = mapping.get(('paint', p.id), p.id)
-                outfit = Outfit(component=comp, vehicleCD=veh_cd)
+                if camos:
+                    from items.customizations import CustomizationOutfit
+                    edit = CustomizationOutfit()
+                    edit.styleId = style.id
+                    edit.camouflages = camos
+                    outfit = style.getOutfit(season, vehicleCD=veh_cd, diff=edit.makeCompDescr())
+            if outfit is None:
+                outfit = style.getOutfit(season, vehicleCD=veh_cd, diff=diffs.get(season))
             if regions is not None:
                 fitOutfit(outfit, regions)
             outfits.append((outfit, season))
         return outfits
+
+    def stored_edits(self, vehicle, style):
+        """{season: diff} the server keeps for this vehicle and style."""
+        try:
+            for style_id, outfit_diffs in self.items_cache.items.inventory.getC11nOutfitsFromPool(
+                    vehicle.intCD) or ():
+                if style_id == style.id:
+                    return dict(outfit_diffs)
+        except Exception:
+            log('stored style edits not read', traceback.format_exc())
+        return {}
+
+    def has_level(self, vehicle, style, mapping):
+        """The vehicle's stored edit has the camouflage of the wanted level (the vehicle's own
+        outfit does not show edits)."""
+        from items.customizations import parseOutfitDescr
+        targets = set(t for (kind, _), t in mapping.items() if kind == 'camo')
+        for diff in self.stored_edits(vehicle, style).values():
+            try:
+                if diff and any(c.id in targets for c in parseOutfitDescr(diff).camouflages):
+                    return True
+            except Exception:
+                log('stored edit not read', traceback.format_exc())
+        return False
 
     @staticmethod
     def _style_camouflages(style, season):
@@ -374,12 +398,18 @@ class AutoStyle(object):
                  if vehicle.getOutfitComponent(s) is not None else '')
                 for s in plan_mod.COMMON_SEASONS)
             _save(self.saved_path, self.saved)
-        plain = self.style_outfits(vehicle, style)
-        edited = self.style_outfits(vehicle, style, mapping) if mapping else None
-        if edited is not None and [o.pack().makeCompDescr() for o, _ in edited] !=                 [o.pack().makeCompDescr() for o, _ in plain]:
-            self._request('apply', vehicle, edited, fallbacks=[plain])
-        else:
-            self._request('apply', vehicle, plain)
+        # the level edit; the style with the edits kept for this vehicle; the bare style
+        tries = []
+        for outfits in ((self.style_outfits(vehicle, style, mapping) if mapping else None),
+                        self.style_outfits(vehicle, style),
+                        self.style_outfits(vehicle, style, stored=False)):
+            if outfits is None:
+                continue
+            key = [o.pack().makeCompDescr() for o, _ in outfits]
+            if all(key != k for k, _ in tries):
+                tries.append((key, outfits))
+        tries = [o for _, o in tries]
+        self._request('apply', vehicle, tries[0], fallbacks=tries[1:])
 
     def spare_style(self, vehicle):
         try:

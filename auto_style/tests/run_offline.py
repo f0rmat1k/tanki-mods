@@ -182,7 +182,10 @@ class OutfitApplier(object):
         for outfit, season in self.outfits:
             comp = Comp.parse(outfit.component.makeCompDescr())
             if comp.styleId == MARBLE:
-                # the server keeps style edits apart: the vehicle's outfit shows the base camouflage
+                # the server keeps style edits apart (in the pool), the vehicle's outfit shows the
+                # base camouflage
+                POOL[self.vehicle.intCD] = [(MARBLE, dict((x, outfit.component.makeCompDescr())
+                                                          for _, x in self.outfits))]
                 comp.camouflages = [Item(31359)]
             self.vehicle.outfits[season] = comp
         callback(Obj(success=True))
@@ -405,24 +408,41 @@ t62.isLocked = False
 items_sync()
 run_callbacks()
 assert REQUESTS[-1] == ('T-62A', ['0|||'] * 3) and not P.wears(t62, STYLES)
-# the edit kept on the server for this vehicle (a paint) stays, the camouflage goes to level 4;
-# the selected vehicle's outfit is fitted to its regions as the customization screen does
+# it wears the marble with an edit at level 2 kept on the server: put on once more at level 4
 POOL[t62.intCD] = [(MARBLE, dict((s, '31387|31360|99|') for s in P.COMMON_SEASONS))]
 t62.outfits = dict((s, Comp(MARBLE, [31360], [99])) for s in P.COMMON_SEASONS)
 del FITS[:]
 count = len(REQUESTS)
 select(t62)
-assert len(REQUESTS) == count, 'it wears the style: nothing to send'
+assert REQUESTS[count:] == [('T-62A', ['31387|31362||decal_cd11'] * 3)], REQUESTS[count:]
+select(t62)
+assert len(REQUESTS) == count + 1, 'at the level now: nothing more to send'
 assert str(t62.intCD) not in mod.saved, 'it wore the style already: nothing of its own to save'
-# a vehicle with an edit stored on the server gets it, with the camouflage at level 4, fitted
+# a vehicle with an edit stored on the server (here with a paint the server would refuse) gets
+# only the camouflage at level 4 instead, fitted to its regions
 bare2 = Veh(14, 'bare2')
 POOL[bare2.intCD] = [(MARBLE, dict((s, '31387|31360|31359|') for s in P.COMMON_SEASONS))]
 GARAGE.append(bare2)
+del FITS[:]
 select(bare2)
-assert REQUESTS[-2][0] == 'T-62A' and REQUESTS[-1] == ('bare2', ['31387|31362|31359|decal_cd14'] * 3),     REQUESTS[-2:]
+assert REQUESTS[-2][0] == 'T-62A' and REQUESTS[-1] == ('bare2', ['31387|31362||decal_cd14'] * 3),     REQUESTS[-2:]
 assert FITS and set(FITS) == set(['cd14']), FITS
 select(t62)
 GARAGE.remove(bare2)
+# wearing the marble at level 1 (as the mod put it before): put on again at level 4, once
+lvl1 = Veh(15, 'lvl1', Comp(MARBLE, [31359]))
+POOL[lvl1.intCD] = [(MARBLE, dict((x, '31387|||') for x in P.COMMON_SEASONS))]
+t62.outfits = dict((x, Comp()) for x in P.COMMON_SEASONS)
+GARAGE.append(lvl1)
+count = len(REQUESTS)
+select(lvl1)
+assert [r for r in REQUESTS[count:]] == [('lvl1', ['31387|31362||decal_cd15'] * 3)], REQUESTS[count:]
+items_sync()
+run_callbacks()
+assert len(REQUESTS) == count + 1
+GARAGE.remove(lvl1)
+t62.outfits = dict((x, Comp(MARBLE, [31359])) for x in P.COMMON_SEASONS)
+select(t62)
 # weekly limit reached: a vehicle with a skin of its own keeps it, a bare one still gets the style
 QUESTS['marble_gold'] = Obj(_data={'conditions': {'customization': {'styleId': MARBLE}}},
                             bonusCond=Obj(getBonusLimit=lambda: 5), isCompleted=lambda: True,
