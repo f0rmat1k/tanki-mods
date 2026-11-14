@@ -24,7 +24,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -240,7 +240,7 @@ class AutoStyle(object):
         if not self.cfg['restore']:
             vehicles = [v for v in vehicles if v.intCD == current_cd]
         action = plan_mod.plan(current, vehicles, self.style_ids,
-                               mapping if self.level_edit_ok else None, bool(limit), free, self.skip)
+                               None, bool(limit), free, self.skip)
         if action is None:
             return
         kind, vehicle = action
@@ -272,12 +272,16 @@ class AutoStyle(object):
             ok = bool(getattr(result, 'success', False))
             log('%s %s: %s' % (kind, vehicle.userName, 'done' if ok else 'failed'))
             if ok:
+                # once per selection: the vehicle's own outfit does not show the level edit (the
+                # server keeps edits apart), so a check of it would put the style on again and again
+                self.skip.add((kind, vehicle.intCD))
                 if done is not None:
                     done()
             elif fallback is not None:
-                # the edited look (the level) was refused: the plain one, and no more edits
-                self.level_edit_ok = False
-                log('%s %s: trying the style without the level change' % (kind, vehicle.userName))
+                # refused: the plain look instead; for the marble, no more level edits
+                if kind == 'apply':
+                    self.level_edit_ok = False
+                log('%s %s: trying the plain look' % (kind, vehicle.userName))
                 self._request(kind, vehicle, fallback, done)
                 return
             else:
@@ -360,6 +364,11 @@ class AutoStyle(object):
         try:
             styles = self.c11n.getStyles(vehicle=vehicle).values()
             spare = plan_mod.spare_styles(styles, vehicle, self.style_ids)
+            # projection decals may not fit a vehicle that is not the selected one (no fitting):
+            # the server refused such a style with 'projection decals quantity greater than acceptable'
+            veh_cd = vehicle.descriptor.makeCompactDescr()
+            spare = [st for st in spare
+                     if not getattr(st.getOutfit(1, vehicleCD=veh_cd).pack(), 'projection_decals', None)]
         except Exception:
             log('styles not read', traceback.format_exc())
             return None
@@ -372,14 +381,10 @@ class AutoStyle(object):
         own = self.saved.get(key, {})
         veh_cd = vehicle.descriptor.makeCompactDescr()
         outfits = []
+        spare = None
         if key not in self.saved and self.cfg['random_style_when_unknown']:
             # the marble was on it before the mod: its own look is not known, give it some style
             spare = self.spare_style(vehicle)
-            if spare is not None:
-                log('%s: own look unknown, putting on style %s' % (vehicle.userName, spare.id))
-                outfits = self.style_outfits(vehicle, spare)
-                self._request('restore', vehicle, outfits)
-                return
         for season in plan_mod.COMMON_SEASONS:
             packed = own.get(str(season))
             if packed:
@@ -392,6 +397,11 @@ class AutoStyle(object):
             if self.saved.pop(key, None) is not None:
                 _save(self.saved_path, self.saved)
 
+        if spare is not None:
+            log('%s: own look unknown, putting on style %s' % (vehicle.userName, spare.id))
+            # if the server refuses it, the vehicle is left without a style
+            self._request('restore', vehicle, self.style_outfits(vehicle, spare), fallback=outfits)
+            return
         self._request('restore', vehicle, outfits, done)
 
 

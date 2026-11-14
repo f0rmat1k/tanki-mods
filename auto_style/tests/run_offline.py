@@ -180,7 +180,11 @@ class OutfitApplier(object):
         if FAIL and FAIL.pop(0):     # FAIL: per request in turn, true = the server refuses
             return callback(Obj(success=False, userMsg='server error'))
         for outfit, season in self.outfits:
-            self.vehicle.outfits[season] = Comp.parse(outfit.component.makeCompDescr())
+            comp = Comp.parse(outfit.component.makeCompDescr())
+            if comp.styleId == MARBLE:
+                # the server keeps style edits apart: the vehicle's outfit shows the base camouflage
+                comp.camouflages = [Item(31359)]
+            self.vehicle.outfits[season] = comp
         callback(Obj(success=True))
 
 
@@ -190,7 +194,8 @@ class Outfit(object):
         self.vehicleCD = vehicleCD
 
     def pack(self):
-        return Comp.parse(self.component.makeCompDescr())
+        import copy
+        return copy.deepcopy(self.component)
 
 
 POOL = {}     # vehicle intCD -> [(style id, {season: diff})]: the edits the server keeps per vehicle
@@ -325,7 +330,35 @@ select(is7)
 assert [r[0] for r in REQUESTS] == ['Turtle Mk. I', 'IS-7'], REQUESTS
 assert turtle.outfits[1].makeCompDescr() == '950|951||' and P.wears(is7, STYLES)
 GARAGE.remove(turtle)
+
+
+class DecalSpare(SpareStyle):
+    def getOutfit(self, season, vehicleCD='', diff=None):
+        outfit = SpareStyle.getOutfit(self, season, vehicleCD, diff)
+        outfit.component.projection_decals = ['big']
+        return Outfit(component=outfit.component, vehicleCD=vehicleCD)
+
+
+# a spare style with projection decals is not used (they may not fit an unselected vehicle);
+# a spare style the server refuses leaves the vehicle without a style
+for spares, fail in (([DecalSpare(960)], []), ([SpareStyle(950)], [1])):
+    SPARE_STYLES[:] = spares
+    turtle = Veh(13, 'Turtle Mk. I', Comp(MARBLE, [31362]))
+    GARAGE[:] = [is7, t62, gold, turtle]
+    select(t62)
+    turtle.outfits = dict((x, Comp(MARBLE, [31362])) for x in P.COMMON_SEASONS)
+    for v in (is7, t62):
+        v.outfits = dict((x, Comp()) for x in P.COMMON_SEASONS)
+    FAIL[:] = fail
+    select(is7)
+    assert turtle.outfits[1].makeCompDescr() == '0|||', turtle.outfits[1].makeCompDescr()
+    assert P.wears(is7, STYLES)
+    GARAGE.remove(turtle)
+    select(gold)
+    is7.outfits = dict((x, Comp(777, [5], [6])) for x in P.COMMON_SEASONS)
 SPARE_STYLES[:] = []
+mod.saved.clear()
+select(is7)
 
 
 assert REQUESTS[-1] == ('IS-7', ['31387|31362||decal_cd10'] * 3), REQUESTS
@@ -333,7 +366,14 @@ assert P.wears(is7, STYLES) and str(is7.intCD) in mod.saved
 select(t62)          # the style moves: IS-7 gets its own style back, then T-62A gets the marble
 assert [r[0] for r in REQUESTS[-2:]] == ['IS-7', 'T-62A'], REQUESTS
 assert is7.outfits[1].makeCompDescr() == '777|5|6|' and str(is7.intCD) not in mod.saved
-assert t62.outfits[1].makeCompDescr() == '31387|31362||decal_cd11'
+assert REQUESTS[-1] == ('T-62A', ['31387|31362||decal_cd11'] * 3), REQUESTS[-1]
+assert t62.outfits[1].makeCompDescr() == '31387|31359||decal_cd11'   # as the server shows it
+# no second request: its outfit shows the base camouflage, which must not look like a wrong level
+count = len(REQUESTS)
+for _ in range(3):
+    items_sync()
+    run_callbacks()
+assert len(REQUESTS) == count, REQUESTS[count:]
 # in battle the vehicle keeps the style; back in the hangar with another one selected it comes off
 t62.isLocked = True
 select(gold)         # Type 59 Gold cannot wear it, T-62A is in battle: nothing to do
@@ -347,10 +387,19 @@ assert REQUESTS[-1] == ('T-62A', ['0|||'] * 3) and not P.wears(t62, STYLES)
 POOL[t62.intCD] = [(MARBLE, dict((s, '31387|31360|99|') for s in P.COMMON_SEASONS))]
 t62.outfits = dict((s, Comp(MARBLE, [31360], [99])) for s in P.COMMON_SEASONS)
 del FITS[:]
+count = len(REQUESTS)
 select(t62)
-assert REQUESTS[-1] == ('T-62A', ['31387|31362|99|decal_cd11'] * 3), REQUESTS[-1]
-assert FITS and set(FITS) == set(['cd11']), FITS
+assert len(REQUESTS) == count, 'it wears the style: nothing to send'
 assert str(t62.intCD) not in mod.saved, 'it wore the style already: nothing of its own to save'
+# a vehicle with an edit stored on the server gets it, with the camouflage at level 4, fitted
+bare2 = Veh(14, 'bare2')
+POOL[bare2.intCD] = [(MARBLE, dict((s, '31387|31360|99|') for s in P.COMMON_SEASONS))]
+GARAGE.append(bare2)
+select(bare2)
+assert REQUESTS[-2][0] == 'T-62A' and REQUESTS[-1] == ('bare2', ['31387|31362|99|decal_cd14'] * 3),     REQUESTS[-2:]
+assert FITS and set(FITS) == set(['cd14']), FITS
+select(t62)
+GARAGE.remove(bare2)
 # weekly limit reached: a vehicle with a skin of its own keeps it, a bare one still gets the style
 QUESTS['marble_gold'] = Obj(_data={'conditions': {'customization': {'styleId': MARBLE}}},
                             bonusCond=Obj(getBonusLimit=lambda: 5), isCompleted=lambda: True,
