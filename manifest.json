@@ -41,6 +41,18 @@
       "size": 64724512,
       "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap-v0.5.3/penmap_0.5.3.mtmod",
       "version": "0.5.3"
+    },
+    "shell_cost": {
+      "description": "В бою: сколько серебра ушло на выстрелы",
+      "dirs": [
+        "res_mods/{client}/mods/shell_cost_cache"
+      ],
+      "file": "shell_cost_0.1.0.mtmod",
+      "name": "Серебро на снаряды",
+      "sha256": "5671323d9e397dba16fe2837b2bd82251c5f8c72b794fbeb161d72f92db54678",
+      "size": 37901,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/shell_cost-v0.1.0/shell_cost_0.1.0.mtmod",
+      "version": "0.1.0"
     }
   },
   "schema": 1
