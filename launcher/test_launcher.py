@@ -86,6 +86,22 @@ def main():
         else:
             raise AssertionError('bad checksum accepted')
         assert sorted(os.listdir(mods_dir)) == ['penmap_0.5.3.mtmod', 'penmap_extra_other.mtmod', 'xvm.mtmod']
+
+        # "Играть" starts Tanki.exe from the game folder, like the Game Center
+        started = []
+        exe = L.start_game(game, popen=lambda args, cwd, close_fds: started.append((args, cwd)))
+        assert started == [([os.path.join(game, 'Tanki.exe')], game)] and exe.endswith('Tanki.exe')
+
+        # self-update: the running exe goes aside as .old, the new one takes its place
+        own = os.path.join(tmp, 'tanki-mods-launcher.exe')
+        with open(own, 'wb') as f:
+            f.write(b'old')
+        with open(own + '.new', 'wb') as f:
+            f.write(b'new')
+        L.replace_exe(own, own + '.new')
+        assert open(own, 'rb').read() == b'new' and open(own + '.old', 'rb').read() == b'old'
+        L.remove_old_exe(own)
+        assert not os.path.exists(own + '.old') and not os.path.exists(own + '.new')
         print('ok')
     finally:
         shutil.rmtree(tmp)

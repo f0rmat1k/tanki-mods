@@ -61,7 +61,7 @@ MODS = {
 }
 LAUNCHER = {
     'version_file': 'launcher/tanki_mods_launcher.py',
-    'built': 'launcher/dist/tanki-mods-launcher.exe',
+    'built': 'launcher/dist/{version}/tanki-mods-launcher.exe',
 }
 
 

@@ -5,6 +5,10 @@ The list of mods comes from manifest.json on the repository's main branch (writt
 for each mod its version, the .mtmod download URL, size and SHA-256, and folders it needs.
 The launcher puts the .mtmod into the game's mods/<client version> folder (from paths.xml), removes
 older versions of it, and remembers what it installed in mods/configs/tanki-mods/installed.json.
+"Играть" updates and then starts the game the way the Lesta Game Center does: Tanki.exe in the game
+folder, which signs in through the Game Center. A newer launcher listed in the manifest replaces the
+running exe: a running exe can be renamed but not overwritten, so it goes aside as <exe>.old and is
+deleted by the next start.
 """
 import hashlib
 import json
@@ -12,6 +16,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.request
@@ -21,7 +26,7 @@ import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = '1.0.1'
+VERSION = '1.1.0'
 REPO = 'f0rmat1k/tanki-mods'
 MANIFEST_URL = 'https://raw.githubusercontent.com/%s/main/manifest.json' % REPO
 RELEASES_URL = 'https://github.com/%s/releases' % REPO
@@ -72,6 +77,52 @@ def game_running():
         return False
     names = set(line.split(',')[0].strip('"').lower() for line in out.splitlines() if line)
     return any(exe.lower() in names for exe in GAME_EXES)
+
+
+def game_exe(game):
+    for exe in GAME_EXES:
+        path = os.path.join(game, exe)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def start_game(game, popen=subprocess.Popen):
+    """Start the game like the Game Center: its Tanki.exe, from the game folder."""
+    exe = game_exe(game)
+    if exe is None:
+        raise RuntimeError('в папке игры нет Tanki.exe')
+    popen([exe], cwd=game, close_fds=True)
+    return exe
+
+
+# ---- self-update ----
+
+def own_exe():
+    """Path of the running launcher exe, or None when it runs as a Python script."""
+    return os.path.abspath(sys.executable) if getattr(sys, 'frozen', False) else None
+
+
+def remove_old_exe(exe):
+    """The previous version left aside by an update; deleting may fail while it is still closing."""
+    if exe and os.path.exists(exe + '.old'):
+        try:
+            os.remove(exe + '.old')
+        except OSError:
+            pass
+
+
+def replace_exe(exe, new_data_path):
+    """Put the downloaded exe in place of the running one; the running one becomes <exe>.old."""
+    old = exe + '.old'
+    if os.path.exists(old):
+        os.remove(old)
+    os.rename(exe, old)
+    try:
+        os.replace(new_data_path, exe)
+    except OSError:
+        os.rename(old, exe)   # put the working version back
+        raise
 
 
 # ---- settings and install state ----
@@ -203,6 +254,9 @@ class Launcher(tk.Tk):
             found = find_game_dirs()
             game = found[0] if found else ''
         self.game.set(game)
+        remove_old_exe(own_exe())
+        # right after a self-update the old process may still hold its file for a moment
+        self.after(5000, lambda: remove_old_exe(own_exe()))
         self.after(100, self._poll)
         self.check_updates()
 
@@ -230,9 +284,11 @@ class Launcher(tk.Tk):
 
         bottom = ttk.Frame(self)
         bottom.pack(fill='x', **pad)
+        self.play_btn = ttk.Button(bottom, text=u'Играть', command=lambda: self.apply(launch=True))
+        self.play_btn.pack(side='right')
         self.apply_btn = ttk.Button(bottom, text=u'Обновить', command=self.apply)
-        self.apply_btn.pack(side='right')
-        ttk.Button(bottom, text=u'Проверить обновления', command=self.check_updates).pack(side='right', padx=6)
+        self.apply_btn.pack(side='right', padx=6)
+        ttk.Button(bottom, text=u'Проверить обновления', command=self.check_updates).pack(side='right')
         ttk.Label(bottom, text=u'Лаунчер %s' % VERSION, foreground='#888').pack(side='left')
 
     # -- helpers --
@@ -258,9 +314,18 @@ class Launcher(tk.Tk):
                 elif kind == 'manifest':
                     self.manifest = value
                     self._show_mods()
+                    self.after(200, self.offer_self_update)
+                elif kind == 'restart':
+                    subprocess.Popen([value], close_fds=True)
+                    self.destroy()
+                    return
+                elif kind == 'started':
+                    self.destroy()   # the game is starting: the launcher is not needed any more
+                    return
                 elif kind == 'done':
                     self.busy = False
                     self.apply_btn.configure(state='normal')
+                    self.play_btn.configure(state='normal')
                     self.bar.configure(value=0)
                     self._show_mods()
         except queue.Empty:
@@ -276,6 +341,7 @@ class Launcher(tk.Tk):
             self.events.put(('done', None))
         self.busy = True
         self.apply_btn.configure(state='disabled')
+        self.play_btn.configure(state='disabled')
         threading.Thread(target=target, daemon=True).start()
 
     # -- actions --
@@ -344,7 +410,32 @@ class Launcher(tk.Tk):
         else:
             self.launcher_note.configure(text='')
 
-    def apply(self):
+    def offer_self_update(self):
+        info = (self.manifest or {}).get('launcher', {})
+        exe = own_exe()
+        if (self.busy or exe is None or not info.get('version')
+                or version_key(info['version']) <= version_key(VERSION)):
+            return
+        # TANKI_MODS_LAUNCHER_YES=1 answers yes, for testing the update of a built exe
+        if os.environ.get('TANKI_MODS_LAUNCHER_YES') != '1' and not messagebox.askyesno(
+                u'Новый лаунчер', u'Вышла версия лаунчера %s (у вас %s). Обновить сейчас? '
+                u'Лаунчер перезапустится.' % (info['version'], VERSION)):
+            return
+
+        def work():
+            self.events.put(('log', u'Скачиваю лаунчер %s…' % info['version']))
+            tmp = exe + '.new'
+            try:
+                download(info['url'], tmp, info['size'], info['sha256'],
+                         lambda done, total: self.events.put(('progress', (u'лаунчер', done, total))))
+                replace_exe(exe, tmp)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            self.events.put(('restart', exe))
+        self._run(work)
+
+    def apply(self, launch=False):
         if self.busy or not self.manifest:
             return
         game = self.game.get()
@@ -352,7 +443,10 @@ class Launcher(tk.Tk):
             messagebox.showwarning(u'Папка игры', u'Укажите папку игры: где лежат paths.xml и Tanki.exe.')
             return
         if game_running():
-            messagebox.showwarning(u'Игра запущена', u'Закройте игру: пока она запущена, моды нельзя заменить.')
+            if launch:
+                messagebox.showinfo(u'Игра запущена', u'Игра уже запущена.')
+            else:
+                messagebox.showwarning(u'Игра запущена', u'Закройте игру: пока она запущена, моды нельзя заменить.')
             return
         selected = dict((k, v.get()) for k, v in self.checks.items())
         self.settings.update(game_dir=game, selected=selected)
@@ -363,7 +457,12 @@ class Launcher(tk.Tk):
             apply_changes(game, manifest, selected,
                           lambda text: self.events.put(('log', text)),
                           lambda name, done, total: self.events.put(('progress', (name, done, total))))
-            self.events.put(('log', u'Готово. Можно запускать игру.'))
+            if launch:
+                start_game(game)
+                self.events.put(('log', u'Запускаю игру…'))
+                self.events.put(('started', None))
+            else:
+                self.events.put(('log', u'Готово. Можно запускать игру.'))
         self._run(work)
 
 
