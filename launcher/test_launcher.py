@@ -105,6 +105,18 @@ def main():
         assert open(own, 'rb').read() == b'new' and open(own + '.old', 'rb').read() == b'old'
         L.remove_old_exe(own)
         assert not os.path.exists(own + '.old') and not os.path.exists(own + '.new')
+
+        # installing itself: a copy in %LOCALAPPDATA%/Programs/tanki-mods and a desktop shortcut
+        os.environ['LOCALAPPDATA'] = os.path.join(tmp, 'local')
+        os.environ['TANKI_MODS_DESKTOP'] = desktop = os.path.join(tmp, 'desktop')
+        os.makedirs(desktop)
+        target = L.install_self(own)
+        assert L.same_path(target, os.path.join(tmp, 'local', 'Programs', 'tanki-mods', L.EXE_NAME))
+        assert open(target, 'rb').read() == b'new'
+        lnk = os.path.join(desktop, L.SHORTCUT_NAME)
+        assert os.path.isfile(lnk) and os.path.getsize(lnk) > 0, os.listdir(desktop)
+        L.install_self(own)   # again over an existing copy
+        assert open(target, 'rb').read() == b'new'
         print('ok')
     finally:
         shutil.rmtree(tmp)

@@ -9,6 +9,9 @@ older versions of it, and remembers what it installed in mods/configs/tanki-mods
 folder, which signs in through the Game Center. A newer launcher listed in the manifest replaces the
 running exe: a running exe can be renamed but not overwritten, so it goes aside as <exe>.old and is
 deleted by the next start.
+Started from anywhere else (a download folder), the launcher offers to copy itself to
+%LOCALAPPDATA%/Programs/tanki-mods and put a shortcut on the desktop: it then updates in that one place
+and the shortcut keeps working.
 """
 import hashlib
 import json
@@ -26,7 +29,7 @@ import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = '1.1.1'
+VERSION = '1.2.0'
 REPO = 'f0rmat1k/tanki-mods'
 MANIFEST_URL = 'https://raw.githubusercontent.com/%s/main/manifest.json' % REPO
 RELEASES_URL = 'https://github.com/%s/releases' % REPO
@@ -35,6 +38,8 @@ SETTINGS = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'tan
 GAME_CENTER_PREFS = r'C:\ProgramData\Lesta\GameCenter\preferences.xml'
 GAME_EXES = ('Tanki.exe', 'WorldOfTanks.exe')
 USER_AGENT = 'tanki-mods-launcher/' + VERSION
+EXE_NAME = 'tanki-mods-launcher.exe'
+SHORTCUT_NAME = u'Моды для Мира танков.lnk'
 
 
 # ---- game folder ----
@@ -119,6 +124,61 @@ def start_game(game, popen=subprocess.Popen):
 
 
 # ---- self-update ----
+
+def install_dir():
+    base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+    return os.path.join(base, 'Programs', 'tanki-mods')
+
+
+def installed_exe():
+    return os.path.join(install_dir(), EXE_NAME)
+
+
+def desktop_dir():
+    """The desktop, also when Windows keeps it in OneDrive; TANKI_MODS_DESKTOP overrides it in tests."""
+    override = os.environ.get('TANKI_MODS_DESKTOP')
+    if override:
+        return override
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0:   # CSIDL_DESKTOPDIRECTORY
+            return buf.value
+    except (AttributeError, OSError):
+        pass
+    return os.path.join(os.path.expanduser('~'), 'Desktop')
+
+
+def make_shortcut(target, lnk):
+    """A .lnk through the Windows Script Host (no extra Python packages in the exe)."""
+    script = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:TM_LNK); "
+              "$s.TargetPath = $env:TM_TARGET; $s.WorkingDirectory = $env:TM_DIR; "
+              "$s.IconLocation = $env:TM_TARGET + ',0'; $s.Save()")
+    env = clean_env()
+    env.update(TM_LNK=lnk, TM_TARGET=target, TM_DIR=os.path.dirname(target))
+    subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-Command', script], env=env, check=True, capture_output=True,
+                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+
+
+def install_self(exe):
+    """Copy the running exe to the install folder and make the desktop shortcut; returns the copy."""
+    import shutil
+    target = installed_exe()
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if os.path.exists(target):
+        old = target + '.old'
+        if os.path.exists(old):
+            os.remove(old)
+        os.rename(target, old)   # also works while an installed copy is running
+    shutil.copyfile(exe, target)
+    make_shortcut(target, os.path.join(desktop_dir(), SHORTCUT_NAME))
+    return target
+
+
+def same_path(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
 
 def own_exe():
     """Path of the running launcher exe, or None when it runs as a Python script."""
@@ -280,7 +340,30 @@ class Launcher(tk.Tk):
         # right after a self-update the old process may still hold its file for a moment
         self.after(5000, lambda: remove_old_exe(own_exe()))
         self.after(100, self._poll)
-        self.check_updates()
+        if not self.offer_install():
+            self.check_updates()
+
+    def offer_install(self):
+        """Started outside the install folder: offer to move there. True if the launcher restarts."""
+        exe = own_exe()
+        if exe is None or same_path(exe, installed_exe()) or self.settings.get('install_declined'):
+            return False
+        yes = os.environ.get('TANKI_MODS_LAUNCHER_YES') == '1' or messagebox.askyesno(
+            u'Установка лаунчера',
+            u'Установить лаунчер в постоянную папку и создать ярлык «Моды для Мира танков» на '
+            u'рабочем столе?\n\n%s\n\nОттуда он будет обновляться сам, и ярлык не сломается.' %
+            install_dir())
+        if not yes:
+            self.settings['install_declined'] = True
+            save_json(SETTINGS, self.settings)
+            return False
+        try:
+            target = install_self(exe)
+        except Exception as e:
+            messagebox.showwarning(u'Установка лаунчера', u'Не получилось: %s' % e)
+            return False
+        self.events.put(('restart', target))
+        return True
 
     def _build(self):
         pad = {'padx': 10, 'pady': 4}
