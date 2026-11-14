@@ -1,0 +1,30 @@
+# build output, exported game data, archives
+build/
+build_*/
+dist/
+out/
+*.mtmod
+*.zip
+*.log
+__pycache__/
+*.pyc
+
+# penmap: game files extracted for research, experiments of the dropped 0.4.0 (kept locally)
+penmap/backup_0.4.0/
+penmap/dev/
+penmap/raw/
+penmap/re/
+penmap/IS-3.xml
+penmap/RESEARCH.md
+penmap/research_*.py
+penmap/dis_*.py
+penmap/find_gvpm.py
+penmap/sheet_ring.py
+penmap/max_ring.py
+penmap/measure_*.py
+penmap/tune_ring.py
+penmap/make_dist.py
+
+# launcher build
+launcher/build/
+launcher/*.spec
