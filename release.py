@@ -2,6 +2,7 @@
 
 Usage: python release.py <mod> [--notes "what is new"]
        python release.py launcher           (after launcher/build.py)
+       python release.py xvm --url <the archive link from modxvm.com's download page>
 The mod must be built first (see its README). Needs the gh CLI logged in.
 The release is tagged <mod>-v<version>; manifest.json is committed and pushed, and the launcher
 reads it from the main branch.
@@ -59,6 +60,17 @@ MODS = {
         'dirs': [],
     },
 }
+# third-party mods: the launcher downloads their official archive, nothing is re-uploaded here
+EXTERNAL = {
+    'xvm': {
+        'name': u'XVM',
+        'description': u'Оленемер, расширенные маркеры, карусель и многое другое.',
+        'source': u'modxvm.com',
+        'page': 'https://modxvm.com/ru/%D1%81%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C-xvm/',
+        'package': 'com.modxvm.xvm',
+        'zip_root': 'lesta',     # the archive holds lesta/ and wg/ builds
+    },
+}
 LAUNCHER = {
     'version_file': 'launcher/tanki_mods_launcher.py',
     'built': 'launcher/dist/{version}/tanki-mods-launcher.exe',
@@ -102,11 +114,55 @@ def publish(tag, title, path, notes):
     return 'https://github.com/%s/releases/download/%s/%s' % (REPO, tag, os.path.basename(path))
 
 
+def save_manifest(manifest, message):
+    with open(MANIFEST, 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write('\n')
+    subprocess.check_call(['git', 'add', 'manifest.json'], cwd=HERE)
+    subprocess.check_call(['git', 'commit', '-q', '-m', '%s\n\nCo-Authored-By: Claude Opus 5.5 '
+                           '<noreply@anthropic.com>' % message], cwd=HERE)
+    subprocess.check_call(['git', 'push', '-q'], cwd=HERE)
+
+
+def list_external(mod_id, url):
+    """Download a third-party archive, read its version and list it in the manifest."""
+    import tempfile
+    import urllib.request
+    import zipfile
+    spec = EXTERNAL[mod_id]
+    fd, path = tempfile.mkstemp(suffix='.zip')
+    os.close(fd)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'tanki-mods-release'})
+        with urllib.request.urlopen(req, timeout=120) as r, open(path, 'wb') as f:
+            f.write(r.read())
+        with zipfile.ZipFile(path) as z:
+            prefix = spec['zip_root'] + '/mods/'
+            pattern = re.compile(r'%s_(\d+(?:\.\d+)*)\.mtmod$' % re.escape(spec['package']))
+            versions = [m.group(1) for m in (pattern.search(n) for n in z.namelist()
+                                             if n.startswith(prefix)) if m]
+        if not versions:
+            raise SystemExit('no %s .mtmod under %s in the archive' % (spec['package'], prefix))
+        entry = dict(spec, kind='zip', version=versions[0], url=url, size=os.path.getsize(path),
+                     sha256=sha256(path), file=os.path.basename(url))
+    finally:
+        os.remove(path)
+    manifest = load_manifest()
+    manifest['mods'][mod_id] = entry
+    save_manifest(manifest, 'List %s %s' % (mod_id, entry['version']))
+    print('listed', mod_id, entry['version'], entry['size'])
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('mod', choices=sorted(MODS) + ['launcher'])
+    ap.add_argument('mod', choices=sorted(MODS) + sorted(EXTERNAL) + ['launcher'])
     ap.add_argument('--notes', default='')
+    ap.add_argument('--url', help='third-party mods: the official archive link')
     a = ap.parse_args()
+    if a.mod in EXTERNAL:
+        if not a.url:
+            raise SystemExit('--url is needed for %s' % a.mod)
+        return list_external(a.mod, a.url)
     spec = LAUNCHER if a.mod == 'launcher' else MODS[a.mod]
     version = version_of(spec['version_file'])
     path = os.path.join(HERE, spec['built'].format(version=version))
@@ -123,13 +179,7 @@ def main():
     else:
         entry.update(name=spec['name'], description=spec['description'], dirs=spec['dirs'])
         manifest['mods'][a.mod] = entry
-    with open(MANIFEST, 'w', encoding='utf-8', newline='\n') as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True)
-        f.write('\n')
-    subprocess.check_call(['git', 'add', 'manifest.json'], cwd=HERE)
-    subprocess.check_call(['git', 'commit', '-q', '-m', 'Release %s\n\nCo-Authored-By: Claude Opus 5.5 '
-                           '<noreply@anthropic.com>' % tag], cwd=HERE)
-    subprocess.check_call(['git', 'push', '-q'], cwd=HERE)
+    save_manifest(manifest, 'Release %s' % tag)
     print('released', tag, url)
 
 

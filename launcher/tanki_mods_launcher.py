@@ -12,6 +12,11 @@ deleted by the next start.
 Started from anywhere else (a download folder), the launcher offers to copy itself to
 %LOCALAPPDATA%/Programs/tanki-mods and put a shortcut on the desktop: it then updates in that one place
 and the shortcut keeps working.
+Third-party mods (XVM) are listed with "kind": "zip": their official archive is unpacked into the
+game (its folder <zip_root>/ holds mods/ and res_mods/), the installed version is read from the
+<package>_<version>.mtmod file, and an unchecked third-party mod is only no longer updated, never
+deleted. Older versions of any mod (<id>_<version>.mtmod next to a newer one) are moved aside into
+mods/configs/tanki-mods/old_versions when that option is on.
 """
 import hashlib
 import json
@@ -22,14 +27,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import webbrowser
 import xml.etree.ElementTree as ET
+import zipfile
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = '1.2.0'
+VERSION = '1.3.0'
 REPO = 'f0rmat1k/tanki-mods'
 MANIFEST_URL = 'https://raw.githubusercontent.com/%s/main/manifest.json' % REPO
 RELEASES_URL = 'https://github.com/%s/releases' % REPO
@@ -249,6 +256,85 @@ def files_of(mods_dir, mod_id):
     return [f for f in os.listdir(mods_dir) if pattern.match(f)]
 
 
+_VERSIONED = re.compile(r'^(?P<id>.+?)_(?P<version>\d+(?:\.\d+)*)\.mtmod$', re.I)
+
+
+def mtmods(mods_dir):
+    """(path relative to mods_dir, package id, version) of every versioned .mtmod, subfolders too."""
+    out = []
+    for dirpath, _, files in os.walk(mods_dir):
+        for f in files:
+            m = _VERSIONED.match(f)
+            if m:
+                rel = os.path.relpath(os.path.join(dirpath, f), mods_dir)
+                out.append((rel, m.group('id').lower(), m.group('version')))
+    return out
+
+
+def package_version(mods_dir, package):
+    """The newest installed version of a package such as com.modxvm.xvm, or None."""
+    versions = [v for _, pid, v in mtmods(mods_dir) if pid == package.lower()]
+    return max(versions, key=version_key) if versions else None
+
+
+def old_versions(mods_dir, packages=None):
+    """Paths (relative to mods_dir) of .mtmod files with a newer version of the same package."""
+    newest = {}
+    found = mtmods(mods_dir)
+    for _, pid, v in found:
+        if pid not in newest or version_key(v) > version_key(newest[pid]):
+            newest[pid] = v
+    return sorted(rel for rel, pid, v in found
+                  if v != newest[pid] and (packages is None or pid in packages))
+
+
+def move_aside(game, mods_dir, rels, log):
+    """Move .mtmod files out of the game into mods/configs/tanki-mods/old_versions/<time>/."""
+    if not rels:
+        return
+    dest_root = os.path.join(game, 'mods', 'configs', 'tanki-mods', 'old_versions',
+                             time.strftime('%Y-%m-%d_%H-%M-%S'))
+    for rel in rels:
+        dest = os.path.join(dest_root, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.replace(os.path.join(mods_dir, rel), dest)
+        log(u'Старая версия убрана: %s' % rel.replace(os.sep, '/'))
+
+
+def unpack_zip(game, client, path, root):
+    """Unpack the archive's <root>/ into the game folder; mods/<v> and res_mods/<v> become this
+    client's version folders. Returns the .mtmod package ids it brought."""
+    packages = set()
+    game_abs = os.path.abspath(game)
+    with zipfile.ZipFile(path) as z:
+        for info in z.infolist():
+            name = info.filename.replace('\\', '/')
+            if root:
+                if not name.startswith(root + '/'):
+                    continue
+                name = name[len(root) + 1:]
+            if not name or name.endswith('/'):
+                continue
+            parts = [p for p in name.split('/') if p not in ('', '.')]
+            if '..' in parts:
+                continue
+            if len(parts) > 2 and parts[0] in ('mods', 'res_mods') and re.match(r'^\d+(\.\d+)+$', parts[1]):
+                parts[1] = client
+            dest = os.path.abspath(os.path.join(game, *parts))
+            if not dest.startswith(game_abs + os.sep):
+                continue
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp = dest + '.part'
+            with z.open(info) as src, open(tmp, 'wb') as out:
+                for chunk in iter(lambda: src.read(1 << 20), b''):
+                    out.write(chunk)
+            os.replace(tmp, dest)
+            m = _VERSIONED.match(parts[-1])
+            if m and parts[0] == 'mods':
+                packages.add(m.group('id').lower())
+    return packages
+
+
 # ---- network ----
 
 def fetch(url, timeout=30):
@@ -277,13 +363,39 @@ def download(url, path, size, sha256, progress):
 
 # ---- installing ----
 
-def apply_changes(game, manifest, selected, log, progress):
-    """Install or update the selected mods, remove the unselected ones. Returns the new state."""
+def install_zip_mod(game, mods_dir, client, mod, log, progress):
+    """A third-party mod from its official archive (see the module doc)."""
+    have = package_version(mods_dir, mod['package'])
+    if have is not None and version_key(have) >= version_key(mod['version']):
+        return
+    log(u'Скачиваю %s %s с %s…' % (mod['name'], mod['version'], mod.get('source', 'сайта автора')))
+    fd, tmp = tempfile.mkstemp(suffix='.zip.part')
+    os.close(fd)
+    try:
+        download(mod['url'], tmp, mod['size'], mod['sha256'],
+                 lambda done, total: progress(mod['name'], done, total))
+        packages = unpack_zip(game, client, tmp, mod.get('zip_root', ''))
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    # the archive's own packages: their older versions must not load next to the new ones
+    move_aside(game, mods_dir, old_versions(mods_dir, packages), log)
+    log(u'Установлен %s %s' % (mod['name'], mod['version']))
+
+
+def apply_changes(game, manifest, selected, log, progress, clean_old=False):
+    """Install or update the selected mods, remove the unselected ones of ours (third-party ones are
+    only no longer updated), move older duplicate versions aside if clean_old. Returns the state."""
     mods_dir, client = client_dirs(game)
     os.makedirs(mods_dir, exist_ok=True)
     state_file = installed_path(game)
     state = load_json(state_file, {})
     for mod_id, mod in sorted(manifest['mods'].items()):
+        if mod.get('kind') == 'zip':
+            if selected.get(mod_id):
+                install_zip_mod(game, mods_dir, client, mod, log, progress)
+                state[mod_id] = {'version': package_version(mods_dir, mod['package'])}
+            continue
         present = files_of(mods_dir, mod_id)
         if not selected.get(mod_id):
             for f in present:
@@ -314,6 +426,8 @@ def apply_changes(game, manifest, selected, log, progress):
         for d in mod.get('dirs', []):
             os.makedirs(os.path.join(game, *d.format(client=client).split('/')), exist_ok=True)
         state[mod_id] = {'version': mod['version'], 'file': mod['file']}
+    if clean_old:
+        move_aside(game, mods_dir, old_versions(mods_dir), log)
     save_json(state_file, state)
     return state
 
@@ -395,6 +509,10 @@ class Launcher(tk.Tk):
         self.apply_btn.pack(side='right', padx=6)
         ttk.Button(bottom, text=u'Проверить обновления', command=self.check_updates).pack(side='right')
         ttk.Label(bottom, text=u'Лаунчер %s' % VERSION, foreground='#888').pack(side='left')
+        self.clean_old = tk.BooleanVar(value=self.settings.get('clean_old', True))
+        ttk.Checkbutton(self, variable=self.clean_old,
+                        text=u'Убирать старые версии модов, если рядом лежит новая '
+                             u'(в mods\\configs\\tanki-mods\\old_versions)').pack(anchor='w', padx=10)
 
     # -- helpers --
 
@@ -487,27 +605,39 @@ class Launcher(tk.Tk):
         except (OSError, RuntimeError, ET.ParseError):
             mods_dir = None
         chosen = self.settings.get('selected', {})
-        for mod_id, mod in sorted(self.manifest['mods'].items(), key=lambda kv: kv[1]['name']):
+        # ours first, then third-party ones
+        order = sorted(self.manifest['mods'].items(),
+                       key=lambda kv: (kv[1].get('kind') == 'zip', kv[1]['name']))
+        for mod_id, mod in order:
+            third_party = mod.get('kind') == 'zip'
+            if third_party:
+                have = package_version(mods_dir, mod['package']) if mods_dir else None
+            else:
+                have = state.get(mod_id, {}).get('version')
+                if not have and mods_dir:
+                    # installed by hand: the version is in the file name, <id>_<version>.mtmod
+                    names = files_of(mods_dir, mod_id)
+                    versions = [n[len(mod_id) + 1:-len('.mtmod')] for n in names]
+                    have = max(versions, key=version_key) if versions else None
             var = self.checks.get(mod_id)
             if var is None:
-                default = chosen.get(mod_id, mod_id in state or not chosen)
+                # a third-party mod is offered for updates only where it is already installed
+                default = chosen.get(mod_id, bool(have) if third_party else (mod_id in state or not chosen))
                 var = self.checks[mod_id] = tk.BooleanVar(value=default)
             row = ttk.Frame(self.list)
             row.pack(fill='x', pady=3)
             ttk.Checkbutton(row, variable=var, text=mod['name']).pack(anchor='w')
-            have = state.get(mod_id, {}).get('version')
-            if not have and mods_dir:
-                # installed by hand: the version is in the file name, <id>_<version>.mtmod
-                names = files_of(mods_dir, mod_id)
-                versions = [n[len(mod_id) + 1:-len('.mtmod')] for n in names]
-                have = max(versions, key=version_key) if versions else None
             if not have:
                 status = u'не установлен, доступна %s' % mod['version']
             elif version_key(have) < version_key(mod['version']):
                 status = u'установлена %s, есть %s' % (have, mod['version'])
             else:
                 status = u'установлена %s, последняя' % have
-            ttk.Label(row, text=mod['description'], wraplength=520, foreground='#444').pack(anchor='w', padx=22)
+            description = mod['description']
+            if third_party:
+                description += u' Сторонний мод, качается с %s; снятая галочка его не удаляет, ' \
+                               u'только не обновляет.' % mod.get('source', u'сайта автора')
+            ttk.Label(row, text=description, wraplength=520, foreground='#444').pack(anchor='w', padx=22)
             ttk.Label(row, text=status, foreground='#2a7a2a' if have == mod['version'] else '#b06000'
                       ).pack(anchor='w', padx=22)
         latest = self.manifest.get('launcher', {}).get('version')
@@ -555,14 +685,16 @@ class Launcher(tk.Tk):
                 messagebox.showwarning(u'Игра запущена', u'Закройте игру: пока она запущена, моды нельзя заменить.')
             return
         selected = dict((k, v.get()) for k, v in self.checks.items())
-        self.settings.update(game_dir=game, selected=selected)
+        clean_old = self.clean_old.get()
+        self.settings.update(game_dir=game, selected=selected, clean_old=clean_old)
         save_json(SETTINGS, self.settings)
         manifest = self.manifest
 
         def work():
             apply_changes(game, manifest, selected,
                           lambda text: self.events.put(('log', text)),
-                          lambda name, done, total: self.events.put(('progress', (name, done, total))))
+                          lambda name, done, total: self.events.put(('progress', (name, done, total))),
+                          clean_old=clean_old)
             if launch:
                 start_game(game)
                 self.events.put(('log', u'Запускаю игру…'))

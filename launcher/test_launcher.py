@@ -117,6 +117,56 @@ def main():
         assert os.path.isfile(lnk) and os.path.getsize(lnk) > 0, os.listdir(desktop)
         L.install_self(own)   # again over an existing copy
         assert open(target, 'rb').read() == b'new'
+
+        # a third-party mod from its official archive: XVM's layout, lesta/mods/<v>/...
+        import zipfile
+        xvm_zip = os.path.join(src, 'xvm.zip')
+        with zipfile.ZipFile(xvm_zip, 'w') as z:
+            z.writestr('lesta/mods/1.45.0.0/com.modxvm.xvm_14.0.0.0004.mtmod', b'xvm4')
+            z.writestr('lesta/mods/1.45.0.0/net.openwg/net.openwg.common_2.8.5.0000.mtmod', b'owg5')
+            z.writestr('lesta/res_mods/configs/xvm/default/carousel.xc', b'new default')
+            z.writestr('lesta/res_mods/configs/xvm/xvm.xc.sample', b'sample')
+            z.writestr('lesta/res_mods/mods/shared_resources/xvm/l10n/ru.xc', b'ru')
+            z.writestr('lesta/../evil.txt', b'outside')
+            z.writestr('wg/mods/2.4.1.1/com.modxvm.xvm_14.0.0.0004.mtmod', b'wg build')
+        with open(xvm_zip, 'rb') as f:
+            data = f.read()
+        xvm = {'kind': 'zip', 'zip_root': 'lesta', 'package': 'com.modxvm.xvm', 'name': 'XVM',
+               'version': '14.0.0.0004', 'description': '', 'url': pathlib.Path(xvm_zip).as_uri(),
+               'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+        os.makedirs(os.path.join(mods_dir, 'net.openwg'))
+        for rel in ('com.modxvm.xvm_14.0.0.0001.mtmod', 'net.openwg/net.openwg.common_2.8.4.0000.mtmod',
+                    'wotstat.positions_2.1.1.mtmod', 'wotstat.positions_2.1.3.mtmod'):
+            open(os.path.join(mods_dir, rel), 'w').close()
+        cfg = os.path.join(game, 'res_mods', 'configs', 'xvm')
+        os.makedirs(os.path.join(cfg, 'default'))
+        with open(os.path.join(cfg, 'xvm.xc'), 'w') as f:
+            f.write('my boot file')
+        assert L.package_version(mods_dir, 'com.modxvm.xvm') == '14.0.0.0001'
+        del log[:]
+        L.apply_changes(game, {'mods': {'xvm': xvm}}, {'xvm': True}, log.append, lambda *a: None)
+        assert L.package_version(mods_dir, 'com.modxvm.xvm') == '14.0.0.0004'
+        assert open(os.path.join(mods_dir, 'com.modxvm.xvm_14.0.0.0004.mtmod'), 'rb').read() == b'xvm4'
+        names = sorted(os.listdir(mods_dir))
+        assert 'com.modxvm.xvm_14.0.0.0001.mtmod' not in names, names   # moved aside with the update
+        assert os.listdir(os.path.join(mods_dir, 'net.openwg')) == ['net.openwg.common_2.8.5.0000.mtmod']
+        assert 'wotstat.positions_2.1.1.mtmod' in names, 'not the archive own: only with clean_old'
+        assert open(os.path.join(cfg, 'xvm.xc')).read() == 'my boot file'
+        assert open(os.path.join(cfg, 'default', 'carousel.xc'), 'rb').read() == b'new default'
+        assert not os.path.exists(os.path.join(tmp, 'evil.txt')) and not os.path.exists(os.path.join(game, '..', 'evil.txt'))
+        aside = os.path.join(game, 'mods', 'configs', 'tanki-mods', 'old_versions')
+        moved = [os.path.join(d, f) for d, _, fs in os.walk(aside) for f in fs]
+        assert len(moved) == 2, moved
+        # installed: nothing downloaded again; unchecked: left in place
+        del log[:]
+        L.apply_changes(game, {'mods': {'xvm': xvm}}, {'xvm': True}, log.append, lambda *a: None)
+        assert not log, log
+        L.apply_changes(game, {'mods': {'xvm': xvm}}, {'xvm': False}, log.append, lambda *a: None)
+        assert L.package_version(mods_dir, 'com.modxvm.xvm') == '14.0.0.0004'
+        # cleaning old versions of any mod
+        L.apply_changes(game, {'mods': {}}, {}, log.append, lambda *a: None, clean_old=True)
+        names = sorted(os.listdir(mods_dir))
+        assert 'wotstat.positions_2.1.1.mtmod' not in names and 'wotstat.positions_2.1.3.mtmod' in names
         print('ok')
     finally:
         shutil.rmtree(tmp)
