@@ -30,6 +30,7 @@ python launcher/build.py
 ```
 
 Сборка кладёт `.exe` в `launcher/dist/<версия>/`: открытый лаунчер держит свой файл, и новая сборка его не перезаписывает.
+
 ```bash
 python launcher/test_launcher.py
 ```
