@@ -94,6 +94,24 @@ def level_mapping(groups, target_level=None):
     return mapping
 
 
+def spare_styles(styles, vehicle, style_ids):
+    """Styles to put on a vehicle whose own look is not known: on the account with a free copy for
+    it, made for it, and plain ones (no progression levels, rent or serial number, not hidden)."""
+    out = []
+    for s in styles:
+        if s.id in style_ids or not s.mayInstall(vehicle) or s.fullInventoryCount(vehicle.intCD) <= 0:
+            continue
+        if any(getattr(s, flag, False) for flag in (
+                'isProgressive', 'isProgressionRequired', 'isQuestsProgression', 'isRentable',
+                'isWithSerialNumber')):
+            continue
+        hidden = getattr(s.descriptor, 'isHiddenInUI', None)
+        if hidden is not None and hidden():
+            continue
+        out.append(s)
+    return sorted(out, key=lambda s: s.id)
+
+
 def _names_style(value, style_ids):
     """A styleId value: one id or, as the game's quest data has it, a list of them."""
     values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]

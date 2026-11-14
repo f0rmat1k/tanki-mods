@@ -18,13 +18,14 @@ import base64
 import copy
 import json
 import os
+import random
 import traceback
 
 import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.1.1'
+__version__ = '0.2.0'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -37,6 +38,9 @@ DEFAULTS = {
     'respect_own_skin_after_limit': True,
     # put the vehicle's own look back once it is no longer selected and is back from battle
     'restore': True,
+    # a vehicle that wore the marble before the mod (its own look unknown) gets a random style of
+    # the account instead of none
+    'random_style_when_unknown': True,
 }
 DELAY = 1.0   # seconds after the last event: a burst of syncs gives one step
 
@@ -306,6 +310,15 @@ class AutoStyle(object):
             outfits.append((Outfit(component=comp, vehicleCD=veh_cd), season))
         self._request('apply', vehicle, outfits)
 
+    def spare_style(self, vehicle):
+        try:
+            styles = self.c11n.getStyles(vehicle=vehicle).values()
+            spare = plan_mod.spare_styles(styles, vehicle, self.style_ids)
+        except Exception:
+            log('styles not read', traceback.format_exc())
+            return None
+        return random.choice(spare) if spare else None
+
     def restore(self, vehicle):
         from vehicle_outfit.outfit import Outfit
         from items.customizations import CustomizationOutfit
@@ -313,6 +326,15 @@ class AutoStyle(object):
         own = self.saved.get(key, {})
         veh_cd = vehicle.descriptor.makeCompactDescr()
         outfits = []
+        if key not in self.saved and self.cfg['random_style_when_unknown']:
+            # the marble was on it before the mod: its own look is not known, give it some style
+            spare = self.spare_style(vehicle)
+            if spare is not None:
+                log('%s: own look unknown, putting on style %s' % (vehicle.userName, spare.id))
+                outfits = [(spare.getOutfit(season, vehicleCD=veh_cd), season)
+                           for season in plan_mod.COMMON_SEASONS]
+                self._request('restore', vehicle, outfits)
+                return
         for season in plan_mod.COMMON_SEASONS:
             packed = own.get(str(season))
             if packed:

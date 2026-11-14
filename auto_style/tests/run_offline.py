@@ -104,6 +104,25 @@ assert not P.find_style_ids({'a': [('styleId', 1)]}, STYLES)
 assert P.find_style_ids({'customization': {'styleId': [MARBLE]}}, STYLES)
 assert P.find_style_ids([('styleId', [1, MARBLE])], STYLES)
 assert not P.find_style_ids({'styleId': [1, 2], 'x': {'styleId': ['a']}}, STYLES)
+
+
+class Spare(object):
+    def __init__(self, id, free=1, fits=True, **flags):
+        self.id, self.free, self.fits = id, free, fits
+        self.__dict__.update(flags)
+        self.descriptor = Obj(isHiddenInUI=lambda: flags.get('hidden', False))
+
+    def mayInstall(self, vehicle):
+        return self.fits
+
+    def fullInventoryCount(self, vehicleCD=None):
+        return self.free
+
+
+spares = [Spare(MARBLE), Spare(902, free=0), Spare(903, fits=False), Spare(904, isProgressive=True),
+          Spare(905, isRentable=True), Spare(906, hidden=True), Spare(907, isWithSerialNumber=True),
+          Spare(908, isQuestsProgression=True), Spare(901)]
+assert [x.id for x in P.spare_styles(spares, bare, STYLES)] == [901]
 print('plan: ok')
 
 
@@ -208,7 +227,9 @@ sys.modules['skeletons.gui.server_events'].IEventsCache = lambda: Obj(
     onSyncCompleted=events_sync, questsProgress=Obj(getTokenCount=lambda t: TOKENS[t]),
     getQuests=lambda: QUESTS, getHiddenQuests=lambda: {})
 sys.modules['skeletons.gui.customization'].ICustomizationService = lambda: Obj(
-    getCtx=lambda: None, getItemByID=lambda t, i: Style() if i == MARBLE else None)
+    getCtx=lambda: None, getItemByID=lambda t, i: Style() if i == MARBLE else None,
+    getStyles=lambda vehicle=None: dict((x.id, x) for x in SPARE_STYLES))
+SPARE_STYLES = []
 module('gui.shared.gui_items', GUI_ITEM_TYPE=Obj(STYLE=12))
 module('gui.shared.gui_items.processors.common', OutfitApplier=OutfitApplier)
 module('gui.shared.utils.requesters', REQ_CRITERIA=Obj(INVENTORY='inventory'))
@@ -237,13 +258,29 @@ gold = Veh(12, 'Type 59 Gold')
 GARAGE[:] = [is7, t62, gold]
 
 
+
 def select(v):
     current.item = v
     on_changed()
     run_callbacks()
 
 
+class SpareStyle(Spare):
+    def getOutfit(self, season, vehicleCD=''):
+        return Outfit(component=Comp(self.id, [self.id + 1]), vehicleCD=vehicleCD)
+
+
+SPARE_STYLES = [SpareStyle(950)]
+# the marble was on a vehicle before the mod: nothing saved, it gets a spare style when it goes off
+turtle = Veh(13, 'Turtle Mk. I', Comp(MARBLE, [31362]))
+GARAGE.append(turtle)
 select(is7)
+assert [r[0] for r in REQUESTS] == ['Turtle Mk. I', 'IS-7'], REQUESTS
+assert turtle.outfits[1].makeCompDescr() == '950|951||' and P.wears(is7, STYLES)
+GARAGE.remove(turtle)
+SPARE_STYLES[:] = []
+
+
 assert REQUESTS[-1] == ('IS-7', ['31387|31362||decal_cd10'] * 3), REQUESTS
 assert P.wears(is7, STYLES) and str(is7.intCD) in mod.saved
 select(t62)          # the style moves: IS-7 gets its own style back, then T-62A gets the marble
