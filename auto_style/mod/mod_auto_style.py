@@ -15,6 +15,7 @@ How it works (auto_style_plan decides, this module talks to the game):
   is open; a failed request is not repeated until the selection changes.
 """
 import base64
+import copy
 import json
 import os
 import random
@@ -24,7 +25,7 @@ import BigWorld
 
 from gui.mods import auto_style_plan as plan_mod
 
-__version__ = '0.3.3'
+__version__ = '0.3.4'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'auto_style')
 DEFAULTS = {
@@ -337,6 +338,10 @@ class AutoStyle(object):
             outfit = style.getOutfit(season, vehicleCD=veh_cd, diff=diffs.get(season))
             if mapping:
                 comp = outfit.pack()
+                if not comp.camouflages:
+                    # an outfit built by the game for a vehicle without stored edits leaves the
+                    # camouflage to the style: take the style's own one, to set its level
+                    comp.camouflages = self._style_camouflages(style, season)
                 for c in comp.camouflages:
                     c.id = mapping.get(('camo', c.id), c.id)
                 for p in comp.paints:
@@ -346,6 +351,20 @@ class AutoStyle(object):
                 fitOutfit(outfit, regions)
             outfits.append((outfit, season))
         return outfits
+
+    @staticmethod
+    def _style_camouflages(style, season):
+        """Copies of the camouflages in the style's own outfit for the season (descriptor.outfits,
+        keyed by season, or by all seasons at once)."""
+        outfits = getattr(style.descriptor, 'outfits', None) or {}
+        found = None
+        for key, comp in outfits.items():
+            if key == season or (isinstance(key, int) and key & season):
+                found = comp
+                break
+        if found is None and outfits:
+            found = list(outfits.values())[0]
+        return copy.deepcopy(list(getattr(found, 'camouflages', None) or []))
 
     def apply(self, vehicle, style, mapping):
         key = str(vehicle.intCD)

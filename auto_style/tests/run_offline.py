@@ -204,7 +204,7 @@ FITS = []
 
 class Style(object):
     id = MARBLE
-    descriptor = Obj(questsProgression=Obj(
+    descriptor = Obj(outfits={15: Comp(MARBLE, [31359])}, questsProgression=Obj(
         getGroupTokens=lambda: ['tok'], getItemsForGroup=lambda t: STYLE_LEVELS,
         getUnlocks=lambda t, n: STYLE_LEVELS[:n + 1]))
 
@@ -218,9 +218,10 @@ class Style(object):
         return vehicle.userName != 'Type 59 Gold'
 
     def getOutfit(self, season, vehicleCD='', diff=None):
-        # the style's base look: level-1 camouflage and a decal that fits only this vehicle; a
-        # stored edit (here: the whole look as a string) replaces camouflage and paint
-        comp = Comp(MARBLE, [31359], (), ['decal_' + vehicleCD])
+        # as in the game: without stored edits the outfit leaves the camouflage to the style (none
+        # in its component) and has a decal that fits only this vehicle; a stored edit (here: the
+        # whole look as a string) brings camouflage and paint
+        comp = Comp(MARBLE, [], (), ['decal_' + vehicleCD])
         if diff:
             edit = Comp.parse(diff)
             comp.camouflages, comp.paints = edit.camouflages, edit.paints
@@ -452,7 +453,7 @@ count, messages = len(REQUESTS), len(MESSAGES)
 select(is7)
 assert [r[0] for r in REQUESTS[count:]] == ['T-62A', 'IS-7', 'IS-7'], REQUESTS[count:]
 assert REQUESTS[-2][1] == ['31387|31362||decal_cd10'] * 3, REQUESTS[-2]
-assert REQUESTS[-1][1] == ['31387|31359||decal_cd10'] * 3, REQUESTS[-1]
+assert REQUESTS[-1][1] == ['31387|||decal_cd10'] * 3, REQUESTS[-1]   # the style's own level 1
 assert P.wears(is7, STYLES) and len(MESSAGES) == messages and not mod.level_edit_ok
 count = len(REQUESTS)
 items_sync()
