@@ -1,11 +1,11 @@
 {
   "launcher": {
     "file": "tanki-mods-launcher.exe",
-    "page": "https://github.com/f0rmat1k/tanki-mods/releases/tag/launcher-v1.0.1",
-    "sha256": "f8749fa7a7800660587f63d5b55f2c1fe4632e6308ddefa7a4e4f8ecd7fa4a8b",
-    "size": 11249505,
-    "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/launcher-v1.0.1/tanki-mods-launcher.exe",
-    "version": "1.0.1"
+    "page": "https://github.com/f0rmat1k/tanki-mods/releases/tag/launcher-v1.1.0",
+    "sha256": "f28a32612c17c08c3dbdb1acde91124c4de8989496805a55fc563ac5e5a687b3",
+    "size": 11252965,
+    "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/launcher-v1.1.0/tanki-mods-launcher.exe",
+    "version": "1.1.0"
   },
   "mods": {
     "camera_zoom": {
