@@ -1,4 +1,4 @@
-"""Build one of the small mods (camera_zoom, shell_cost, gun_marks) into an .mtmod.
+"""Build one of the small mods (camera_zoom, shell_cost, gun_marks, auto_style) into an .mtmod.
 
 Usage: python build_small.py <mod> [--install]
 Compiles <mod>/mod/*.py for Python 2.7 into res/scripts/client/gui/mods. Mods that write text in
@@ -24,6 +24,8 @@ MODS = {
                    'description': 'Silver spent on shells in the current battle'},
     'gun_marks': {'name': 'Gun marks', 'label': True,
                   'description': 'Mark of excellence %, damage for the next mark, damage this battle'},
+    'auto_style': {'name': 'Auto style', 'label': False,
+                   'description': 'The selected vehicle wears the Noble Marble style'},
 }
 META = """<root>
 	<id>%s</id>

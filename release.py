@@ -59,6 +59,16 @@ MODS = {
         'description': u'Камеру от третьего лица можно отодвинуть до 50 м вместо 25',
         'dirs': [],
     },
+    'auto_style': {
+        'version_file': 'auto_style/mod/mod_auto_style.py',
+        'built': 'auto_style/build/auto_style_{version}.mtmod',
+        'name': u'Автостиль «Благородный мрамор»',
+        'description': u'Выбранный в ангаре танк сам надевает «Благородный мрамор» (золото за '
+                       u'победы) последнего открытого уровня; танк, с которого стиль ушёл, '
+                       u'получает свой внешний вид обратно. После недельного лимита золота танки '
+                       u'со своим стилем или камуфляжем не трогаются',
+        'dirs': [],
+    },
 }
 # third-party mods: the launcher downloads their official archive, nothing is re-uploaded here
 EXTERNAL = {
