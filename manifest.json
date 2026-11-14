@@ -1,0 +1,17 @@
+{
+  "mods": {
+    "penmap": {
+      "description": "Схема брони цели, раскрашенная под ваш снаряд, и шпаргалка по своему танку перед боем. Ctrl+Shift+P — настройки в ангаре",
+      "dirs": [
+        "res_mods/{client}/mods/penmap_cache"
+      ],
+      "file": "penmap_0.5.3.mtmod",
+      "name": "Карта пробития",
+      "sha256": "31725dc0171d21133db7665c25779d50dae43b616b866e2de566d4f503e2c847",
+      "size": 64724512,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap-v0.5.3/penmap_0.5.3.mtmod",
+      "version": "0.5.3"
+    }
+  },
+  "schema": 1
+}
