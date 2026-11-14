@@ -110,6 +110,63 @@ module('gui.Scaleform.daapi.view.common.vehicle_carousel.carousel_filter',
        FILTER_KEYS=Obj(SEARCH_NAME_VEHICLE='searchNameVehicle'))
 module('gui.shared.utils', makeSearchableString=makeSearchableString)
 module('gui.shared.utils.requesters', REQ_CRITERIA=REQ_CRITERIA)
+
+
+# vehicle tooltip header, as gui.shared.tooltips.vehicle / formatters build it
+def packTextBlockData(text, useHtml=True, linkage='TextBlock', padding=None, blockWidth=0):
+    data = {'linkage': linkage, 'data': {'text': text, 'useHtml': useHtml}, 'blockWidth': blockWidth}
+    if padding is not None:
+        data['padding'] = padding
+    return data
+
+
+def packPadding(top=0, left=0, bottom=0, right=0):
+    return {'top': top, 'left': left, 'bottom': bottom, 'right': right}
+
+
+class HeaderBlockConstructor(object):
+    def __init__(self, vehicle, role=False):
+        self.vehicle, self.role = vehicle, role
+
+    def construct(self):
+        lines = [packTextBlockData('title')]
+        if self.role:
+            lines.append(packTextBlockData('role', padding=packPadding(top=-9, left=101, bottom=9)))
+        return [{'linkage': 'BuildUp', 'data': {'blocksData': lines}}]
+
+
+# research page: node data and title, as gui.techtree.dumpers / research_page build them
+class ResearchBaseDumper(object):
+    def _getItemData(self, node, rootItem):
+        return {'id': node.intCD, 'nameString': node.name, 'level': 10}
+
+
+class ResearchItemsObjDumper(ResearchBaseDumper):
+    def _getItemData(self, node, rootItem):
+        data = super(ResearchItemsObjDumper, self)._getItemData(node, rootItem)
+        data['earnedXP'] = 0
+        return data
+
+
+class Research(object):
+    def __init__(self, intCD, name):
+        self.intCD, self.name = intCD, name
+
+    def _getRootData(self):
+        title = "<font face='$TitleFont' size='36' color='#FFFFFF'>%s</font>" % self.name
+        return {'vehicleTitle': {'intCD': self.intCD, 'tankNameStr': title, 'tankNameStrSmall': title,
+                                 'tankTierStr': 'X'}}
+
+
+module('gui.shared.tooltips')
+module('gui.shared.tooltips.formatters', packTextBlockData=packTextBlockData, packPadding=packPadding)
+module('gui.shared.tooltips.vehicle', HeaderBlockConstructor=HeaderBlockConstructor)
+module('gui.techtree')
+module('gui.techtree.dumpers', ResearchBaseDumper=ResearchBaseDumper,
+       ResearchItemsObjDumper=ResearchItemsObjDumper)
+for name in ('gui.Scaleform.daapi.view.lobby', 'gui.Scaleform.daapi.view.lobby.techtree'):
+    module(name)
+module('gui.Scaleform.daapi.view.lobby.techtree.research_page', Research=Research)
 sys.path.insert(0, os.path.join(TOOL, 'mod'))
 import nearyou_data  # noqa: E402
 import nearyou_xvm  # noqa: E402
@@ -165,6 +222,48 @@ ny.cfg['show_difficulty'] = False
 assert u'лег.'.encode('utf-8') not in cdp.getVehicleDataVO(is7)['label']
 ny.cfg['show_difficulty'] = True
 print('labels: ok')
+
+# vehicle tooltip (tech tree, carousel): a line under the name, or under the role line
+block = HeaderBlockConstructor(is7).construct()
+lines = block[0]['data']['blocksData']
+assert len(lines) == 2, lines
+line = lines[1]
+print(line['data']['text'])
+assert line['data']['text'] == (u"<font face='$FieldFont' size='14' color='#A39D8C'>Near_You: ранг "
+                                 u"<font color='#FF9A1F'>SSS</font>, сложность <font color='#7CD67C'>"
+                                 u"низкая</font></font>").encode('utf-8'), line
+assert line['padding'] == packPadding(top=-9, left=101, bottom=9)
+with_role = HeaderBlockConstructor(maus, role=True).construct()[0]['data']['blocksData']
+assert len(with_role) == 3 and with_role[2]['padding']['top'] == -11
+assert len(HeaderBlockConstructor(lt).construct()[0]['data']['blocksData']) == 1, 'unrated vehicle'
+ny.cfg['tooltip'] = False
+assert len(HeaderBlockConstructor(is7).construct()[0]['data']['blocksData']) == 1
+ny.cfg['tooltip'] = True
+print('tooltip: ok')
+
+
+# research page: plain rank in front of vehicle names (a plain-text field), colored after the title
+def node(intCD, name, is_vehicle=True):
+    return Obj(intCD=intCD, name=name, isVehicle=lambda: is_vehicle)
+
+
+dumper = ResearchItemsObjDumper()
+assert dumper._getItemData(node(IS7, is7.userName), None)['nameString'] == \
+    u'SSS лег. ИС-7'.encode('utf-8')
+assert dumper._getItemData(node(MAUS, 'Maus'), None)['nameString'] == u'D слож. Maus'.encode('utf-8')
+assert dumper._getItemData(node(MAUS, u'Maus'), None)['nameString'] == u'D слож. Maus'
+assert dumper._getItemData(node(IS7, 'Gun', is_vehicle=False), None)['nameString'] == 'Gun'
+assert dumper._getItemData(node(1, 'MS-1'), None)['nameString'] == 'MS-1'
+title = Research(IS7, 'IS-7')._getRootData()['vehicleTitle']
+print(title['tankNameStr'])
+assert title['tankNameStr'] == (u"<font face='$TitleFont' size='36' color='#FFFFFF'>IS-7  <font "
+                                u"color='#FF9A1F'>SSS</font> <font color='#7CD67C'>лег.</font></font>").encode('utf-8')
+assert title['tankNameStrSmall'] == title['tankNameStr'] and title['tankTierStr'] == 'X'
+ny.cfg['research'] = False
+assert dumper._getItemData(node(MAUS, 'Maus'), None)['nameString'] == 'Maus'
+assert Research(IS7, 'IS-7')._getRootData()['vehicleTitle']['tankNameStr'].count('SSS') == 0
+ny.cfg['research'] = True
+print('research page: ok')
 
 # XVM: macros by the vehicle's system name; registered again after XVM reloads its macros
 macro = pymacro._container['nearyou.label'][0]

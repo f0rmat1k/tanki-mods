@@ -12,6 +12,13 @@ macro {{py:nearyou.label('{{v.sysname}}')}} for extraFields and writes it into X
 config at start (nearyou_xvm), and the label stays as is once that config uses it. The search box goes through
 BasicCriteriesGroup._setVehicleNameCriteria, where a text starting with '#' becomes a rank /
 difficulty filter (nearyou_data.parse_query).
+
+Tech tree: the nation tree is a Gameface view that gets only vehicle ids from Python and draws the
+names itself, so the rank goes into the vehicle tooltip instead (HeaderBlockConstructor, the header
+of every vehicle tooltip: tech tree, carousel, shop). The research page of one vehicle is Scaleform:
+the names under its nodes come from dumpers.ResearchBaseDumper._getItemData as 'nameString' and go
+into a plain-text field (ResearchItem.nameField.text), so they get the rank without colors; its
+title (Research._getRootData, htmlText) gets it in color.
 """
 import datetime
 import json
@@ -26,7 +33,7 @@ import ResMgr
 from gui.mods import nearyou_data
 from gui.mods import nearyou_xvm
 
-__version__ = '0.3.1'
+__version__ = '0.4.0'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'nearyou')
 DEFAULTS = {
@@ -40,6 +47,10 @@ DEFAULTS = {
     # add the rank to XVM's carousel config (res_mods/configs/xvm) when it is not there yet
     'xvm_config': True,
     'url': nearyou_data.SOURCE_URL,
+    # a "Near_You: rank A, difficulty medium" line in vehicle tooltips (the tech tree among them)
+    'tooltip': True,
+    # rank on the research page of a vehicle: its title and the names of the vehicles around it
+    'research': True,
 }
 SNAPSHOT = 'mods/nearyou/ratings.json'
 FETCH_TIMEOUT = 20.0
@@ -49,6 +60,10 @@ RANK_COLOR = {'s+': '#FF9A1F', 's': '#FFD24A', 'a': '#A6E05A', 'b': '#64C8FF', '
               'd': '#A89A86', 'f': '#E85A4F'}
 DIFFICULTY_TEXT = {'easy': u'лег.', 'medium': u'сред.', 'hard': u'слож.', 'hardcore': u'хард'}
 DIFFICULTY_COLOR = {'easy': '#7CD67C', 'medium': '#E8D060', 'hard': '#F09040', 'hardcore': '#E04848'}
+DIFFICULTY_WORD = {'easy': u'низкая', 'medium': u'средняя', 'hard': u'высокая', 'hardcore': u'хардкор'}
+# the game's text_styles.main, the style of the role line in the tooltip header
+TOOLTIP_STYLE = u"<font face='$FieldFont' size='14' color='#A39D8C'>%s</font>"
+TOOLTIP_TEXT_OFFSET = 101   # HeaderBlockConstructor's leftOffset: text right of the class icon
 
 
 def log(*args):
@@ -229,6 +244,66 @@ class NearYou(object):
             parts.append(_font(DIFFICULTY_TEXT[difficulty], DIFFICULTY_COLOR[difficulty]))
         return sep.join(parts)
 
+    def plain_badge(self, intCD):
+        """'A сред.' without colors, for plain-text fields."""
+        if not self.cfg['enabled']:
+            return u''
+        rating, difficulty = self.ratings.get(intCD, ('', ''))
+        parts = []
+        if self.cfg['show_rank'] and rating:
+            parts.append(RANK_TEXT[rating])
+        if self.cfg['show_difficulty'] and difficulty:
+            parts.append(DIFFICULTY_TEXT[difficulty])
+        return u' '.join(parts)
+
+    def tooltip_line(self, intCD):
+        """'Near_You: ранг A, сложность средняя' (html) for the vehicle tooltip, or u''."""
+        if not (self.cfg['enabled'] and self.cfg['tooltip']):
+            return u''
+        rating, difficulty = self.ratings.get(intCD, ('', ''))
+        parts = []
+        if self.cfg['show_rank'] and rating:
+            parts.append(u'ранг ' + _font(RANK_TEXT[rating], RANK_COLOR[rating]))
+        if self.cfg['show_difficulty'] and difficulty:
+            parts.append(u'сложность ' + _font(DIFFICULTY_WORD[difficulty], DIFFICULTY_COLOR[difficulty]))
+        if not parts:
+            return u''
+        return TOOLTIP_STYLE % (u'Near_You: ' + u', '.join(parts))
+
+    def decorate_tooltip_header(self, vehicle, block):
+        """Add the tooltip line under the header's name / role lines (HeaderBlockConstructor)."""
+        line = self.tooltip_line(getattr(vehicle, 'intCD', None))
+        if not line or not block:
+            return block
+        from gui.shared.tooltips import formatters
+        lines = block[0]['data']['blocksData']
+        # the same paddings as the game's role and "preferential" lines
+        top = -9 if len(lines) == 1 else -11
+        lines.append(formatters.packTextBlockData(line.encode('utf-8'), padding=formatters.packPadding(
+            top=top, left=TOOLTIP_TEXT_OFFSET, bottom=9)))
+        return block
+
+    def decorate_research_node(self, node, data):
+        """Plain 'A сред.' in front of a vehicle's name on the research page."""
+        if not self.cfg['research'] or not node.isVehicle() or 'nameString' not in data:
+            return data
+        badge = self.plain_badge(data.get('id'))
+        if badge:
+            data['nameString'] = _decorate(data['nameString'], badge + u' ', u'')
+        return data
+
+    def decorate_research_root(self, result):
+        """Colored rank after the title of the research page."""
+        title = result.get('vehicleTitle') if self.cfg['research'] else None
+        if not title:
+            return result
+        badge = self.badge(title.get('intCD'))
+        if badge:
+            for key in ('tankNameStr', 'tankNameStrSmall'):
+                if key in title:
+                    title[key] = _decorate(title[key], u'', u'  ' + badge)
+        return result
+
     def decorate(self, vo):
         """Rank and difficulty in front of the name: after it a long name would cut them off.
 
@@ -378,6 +453,53 @@ def _name_criteria(orig, self, filters):
     self._criteria |= REQ_CRITERIA.CUSTOM(predicate)
 
 
+def _tooltip_header(orig, self, *args, **kwargs):
+    block = orig(self, *args, **kwargs)
+    try:
+        g_nearyou.decorate_tooltip_header(self.vehicle, block)
+    except Exception:
+        log('tooltip failed', traceback.format_exc())
+    return block
+
+
+def _research_node(orig, self, node, rootItem):
+    data = orig(self, node, rootItem)
+    try:
+        g_nearyou.decorate_research_node(node, data)
+    except Exception:
+        log('research node failed', traceback.format_exc())
+    return data
+
+
+def _research_root(orig, self, *args, **kwargs):
+    result = orig(self, *args, **kwargs)
+    try:
+        g_nearyou.decorate_research_root(result)
+    except Exception:
+        log('research title failed', traceback.format_exc())
+    return result
+
+
+def _patch_tech_tree():
+    """Each part on its own: a game update that moves one of them leaves the others working."""
+    try:
+        from gui.shared.tooltips import vehicle as vehicle_tooltips
+        _override(vehicle_tooltips.HeaderBlockConstructor, 'construct', _tooltip_header)
+    except Exception:
+        log('vehicle tooltip not patched', traceback.format_exc())
+    try:
+        from gui.techtree import dumpers
+        # ResearchItemsObjDumper reaches it through super(), looked up at call time
+        _override(dumpers.ResearchBaseDumper, '_getItemData', _research_node)
+    except Exception:
+        log('research nodes not patched', traceback.format_exc())
+    try:
+        from gui.Scaleform.daapi.view.lobby.techtree import research_page
+        _override(research_page.Research, '_getRootData', _research_root)
+    except Exception:
+        log('research title not patched', traceback.format_exc())
+
+
 def _provider_init(orig, self, *args, **kwargs):
     orig(self, *args, **kwargs)
     try:
@@ -399,6 +521,7 @@ def init():
     except Exception:
         log('init failed', traceback.format_exc())
         return
+    _patch_tech_tree()
     try:
         _register_xvm_macros()
     except Exception:
