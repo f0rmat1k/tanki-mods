@@ -197,7 +197,10 @@ stamp = [os.path.getmtime(p) for p in cells]
 second = mod_nearyou.NearYou()
 assert not second.use_label and [os.path.getmtime(p) for p in cells] == stamp
 ny.use_label = False
+module('xvm_tankcarousel')   # XVM's carousel is running: it shows the rank
 assert cdp.getVehicleDataVO(is7)['label'] == vehicle_name(is7.userName)
+del sys.modules['xvm_tankcarousel']   # XVM failed to load: the label shows the rank after all
+assert u'SSS'.encode('utf-8') in cdp.getVehicleDataVO(is7)['label']
 ny.use_label = True
 print('XVM macros and config: ok')
 

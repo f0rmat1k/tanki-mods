@@ -16,6 +16,7 @@ difficulty filter (nearyou_data.parse_query).
 import datetime
 import json
 import os
+import sys
 import traceback
 import weakref
 
@@ -25,7 +26,7 @@ import ResMgr
 from gui.mods import nearyou_data
 from gui.mods import nearyou_xvm
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 CONFIG_DIR = os.path.join('mods', 'configs', 'nearyou')
 DEFAULTS = {
@@ -60,6 +61,11 @@ def _game_root():
         if os.path.isdir(os.path.join(d, 'mods')):
             return d
     return cwd
+
+
+def xvm_carousel_loaded():
+    """XVM's carousel package is imported by its loader only when XVM starts without errors."""
+    return 'xvm_tankcarousel' in sys.modules
 
 
 def _searchable(word):
@@ -224,8 +230,11 @@ class NearYou(object):
         return sep.join(parts)
 
     def decorate(self, vo):
-        """Rank and difficulty in front of the name: after it a long name would cut them off."""
-        if not self.use_label:
+        """Rank and difficulty in front of the name: after it a long name would cut them off.
+
+        With the macros in XVM's config the label is left to XVM, but only while XVM's carousel
+        really runs: XVM can fail to load (a missing native DLL takes all of it down)."""
+        if not self.use_label and xvm_carousel_loaded():
             return vo
         badge = self.badge(vo.get('intCD'))
         if badge and 'label' in vo:

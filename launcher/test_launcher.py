@@ -89,8 +89,11 @@ def main():
 
         # "Играть" starts Tanki.exe from the game folder, like the Game Center
         started = []
-        exe = L.start_game(game, popen=lambda args, cwd, close_fds: started.append((args, cwd)))
-        assert started == [([os.path.join(game, 'Tanki.exe')], game)] and exe.endswith('Tanki.exe')
+        os.environ['_PYI_APPLICATION_HOME_DIR'] = 'C:/Temp/_MEI123'   # what a frozen launcher has
+        exe = L.start_game(game, popen=lambda args, cwd, env, close_fds: started.append((args, cwd, env)))
+        assert started[0][:2] == ([os.path.join(game, 'Tanki.exe')], game) and exe.endswith('Tanki.exe')
+        assert not any(k.startswith('_PYI') for k in started[0][2]), 'launcher env leaked into the game'
+        del os.environ['_PYI_APPLICATION_HOME_DIR']
 
         # self-update: the running exe goes aside as .old, the new one takes its place
         own = os.path.join(tmp, 'tanki-mods-launcher.exe')

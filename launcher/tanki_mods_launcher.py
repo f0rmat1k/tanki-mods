@@ -26,7 +26,7 @@ import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = '1.1.0'
+VERSION = '1.1.1'
 REPO = 'f0rmat1k/tanki-mods'
 MANIFEST_URL = 'https://raw.githubusercontent.com/%s/main/manifest.json' % REPO
 RELEASES_URL = 'https://github.com/%s/releases' % REPO
@@ -87,12 +87,34 @@ def game_exe(game):
     return None
 
 
+def clean_env(reset_frozen=False):
+    """os.environ without what the PyInstaller bootloader adds for itself (_PYI_*, _MEI*, Tcl/Tk paths
+    into its temporary folder). reset_frozen asks a frozen exe started from here to set up afresh."""
+    env = dict((k, v) for k, v in os.environ.items()
+               if not k.upper().startswith(('_PYI', '_MEI', 'TCL_LIBRARY', 'TK_LIBRARY',
+                                            'PYINSTALLER_RESET_ENVIRONMENT')))
+    if reset_frozen:
+        env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
+    return env
+
+
+def reset_dll_directory():
+    """The frozen launcher's bootloader points the DLL search at its temporary folder, and child
+    processes inherit it: the game then failed to load XVM's native DLLs once the launcher exited and
+    the folder was gone. Undo it before starting anything."""
+    if os.name == 'nt' and getattr(sys, 'frozen', False):
+        import ctypes
+        ctypes.windll.kernel32.SetDllDirectoryW(None)
+
+
 def start_game(game, popen=subprocess.Popen):
-    """Start the game like the Game Center: its Tanki.exe, from the game folder."""
+    """Start the game like the Game Center: its Tanki.exe, from the game folder, in a clean
+    environment."""
     exe = game_exe(game)
     if exe is None:
         raise RuntimeError('в папке игры нет Tanki.exe')
-    popen([exe], cwd=game, close_fds=True)
+    reset_dll_directory()
+    popen([exe], cwd=game, env=clean_env(), close_fds=True)
     return exe
 
 
@@ -316,7 +338,8 @@ class Launcher(tk.Tk):
                     self._show_mods()
                     self.after(200, self.offer_self_update)
                 elif kind == 'restart':
-                    subprocess.Popen([value], close_fds=True)
+                    reset_dll_directory()
+                    subprocess.Popen([value], env=clean_env(reset_frozen=True), close_fds=True)
                     self.destroy()
                     return
                 elif kind == 'started':
