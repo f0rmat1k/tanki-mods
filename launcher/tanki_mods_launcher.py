@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 REPO = 'f0rmat1k/tanki-mods'
 MANIFEST_URL = 'https://raw.githubusercontent.com/%s/main/manifest.json' % REPO
 RELEASES_URL = 'https://github.com/%s/releases' % REPO
@@ -100,6 +100,14 @@ def version_key(v):
     return tuple(int(x) if x.isdigit() else x for x in re.split(r'[.\-]', v or '0'))
 
 
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def files_of(mods_dir, mod_id):
     """This mod's .mtmod files in the mods folder, any version: <id>_<version>.mtmod."""
     if not os.path.isdir(mods_dir):
@@ -151,8 +159,11 @@ def apply_changes(game, manifest, selected, log, progress):
             state.pop(mod_id, None)
             continue
         target = os.path.join(mods_dir, mod['file'])
-        up_to_date = (state.get(mod_id, {}).get('version') == mod['version']
-                      and os.path.isfile(target) and os.path.getsize(target) == mod['size'])
+        same_file = os.path.isfile(target) and os.path.getsize(target) == mod['size']
+        if same_file and state.get(mod_id, {}).get('version') != mod['version']:
+            # put there by hand or by an older launcher: trust it only if it is the same file
+            same_file = file_sha256(target) == mod['sha256']
+        up_to_date = same_file
         if not up_to_date:
             log(u'Скачиваю %s %s…' % (mod['name'], mod['version']))
             fd, tmp = tempfile.mkstemp(suffix='.part', dir=mods_dir)   # not *.mtmod: the game would load it
@@ -299,6 +310,10 @@ class Launcher(tk.Tk):
             return
         game = self.game.get()
         state = load_json(installed_path(game), {}) if is_game_dir(game) else {}
+        try:
+            mods_dir = client_dirs(game)[0] if is_game_dir(game) else None
+        except (OSError, RuntimeError, ET.ParseError):
+            mods_dir = None
         chosen = self.settings.get('selected', {})
         for mod_id, mod in sorted(self.manifest['mods'].items(), key=lambda kv: kv[1]['name']):
             var = self.checks.get(mod_id)
@@ -309,6 +324,11 @@ class Launcher(tk.Tk):
             row.pack(fill='x', pady=3)
             ttk.Checkbutton(row, variable=var, text=mod['name']).pack(anchor='w')
             have = state.get(mod_id, {}).get('version')
+            if not have and mods_dir:
+                # installed by hand: the version is in the file name, <id>_<version>.mtmod
+                names = files_of(mods_dir, mod_id)
+                versions = [n[len(mod_id) + 1:-len('.mtmod')] for n in names]
+                have = max(versions, key=version_key) if versions else None
             if not have:
                 status = u'не установлен, доступна %s' % mod['version']
             elif version_key(have) < version_key(mod['version']):

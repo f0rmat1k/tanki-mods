@@ -69,6 +69,13 @@ def main():
         assert sorted(os.listdir(mods_dir)) == ['penmap_0.5.3.mtmod', 'penmap_extra_other.mtmod', 'xvm.mtmod']
         assert 'nearyou_ranks' not in L.load_json(L.installed_path(game), {})
 
+        # a file put there by hand with the same content is kept, not downloaded again
+        os.remove(L.installed_path(game))
+        del log[:]
+        L.apply_changes(game, manifest, {'penmap': True, 'nearyou_ranks': False}, log.append,
+                        lambda *a: None)
+        assert not any(u'Скачиваю' in m for m in log), log
+
         # a broken download leaves the installed version and no partial file
         broken = dict(penmap, version='0.5.4', file='penmap_0.5.4.mtmod', sha256='0' * 64)
         try:
