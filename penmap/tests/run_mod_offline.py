@@ -264,10 +264,11 @@ class Vehicle(object):
     publicInfo = {'team': 2}
     isStarted = True
 
-    def __init__(self, vid, vdesc, pos):
+    def __init__(self, vid, vdesc, pos, forward=None):
         self.id = vid
         self.typeDescriptor = vdesc
         self.position = pos
+        self.forward = forward or V3(0.0, 0.0, 1.0)
         ENTITIES[vid] = self
 
     def isAlive(self):
@@ -404,6 +405,65 @@ pm._update()
 run_for(0.05)
 assert len(pm.textures) == before + 2 and pm.last_results is not computed
 print('re-render on pen or caption distance change: ok')
+
+# angle helpers
+import math
+from mod_penmap import (_is_ring_view, _view_angle, _angular_dist, _clamp_angle,
+                        _nearest_view, _target_angle)
+assert _is_ring_view('v030') and _is_ring_view('v330') and not _is_ring_view('front')
+assert not _is_ring_view('v03') and not _is_ring_view('v0300')
+assert _view_angle('front') == 0 and _view_angle('rear') == 180 and _view_angle('v090') == 90
+assert _view_angle('angle20') == 20
+assert _angular_dist(10, 350) == 20 and _angular_dist(0, 180) == 180
+# clamp: rear hemisphere maps to the nearest side
+assert _clamp_angle(0) == 0 and _clamp_angle(45) == 45 and _clamp_angle(90) == 90
+assert _clamp_angle(91) == 90 and _clamp_angle(135) == 90 and _clamp_angle(180) == 90
+assert _clamp_angle(181) == 270 and _clamp_angle(250) == 270
+assert _clamp_angle(270) == 270 and _clamp_angle(300) == 300 and _clamp_angle(350) == 350
+# ring views: front hemisphere only (0..90, 270..360)
+ring = ['v010', 'v020', 'v030', 'v040', 'v050', 'v060', 'v070', 'v080', 'v090',
+        'v270', 'v280', 'v290', 'v300', 'v310', 'v320', 'v330', 'v340', 'v350']
+assert _nearest_view(ring, 0) == 'v010' or _nearest_view(ring, 0) == 'v350'
+assert _nearest_view(ring, 45) == 'v040' or _nearest_view(ring, 45) == 'v050'
+assert _nearest_view(ring, 90) == 'v090'
+# rear angles get clamped to sides
+assert _nearest_view(ring, 180) == 'v090'   # clamped to 90
+assert _nearest_view(ring, 200) == 'v270'   # clamped to 270
+assert _nearest_view(ring, 270) == 'v270'
+# _target_angle: player at (0,0,0), target at (0,0,200) facing +z  => player directly behind (180)
+is3.position = V3(0.0, 0.0, 200.0)
+is3.forward = V3(0.0, 0.0, 1.0)
+a = _target_angle(is3)
+assert 175 < a < 185, 'expected ~180, got %s' % a
+# player at (200, 0, 200), target at (0,0,200) facing +z => player to the right (90)
+PLAYER.getOwnVehiclePosition = lambda: V3(200.0, 0.0, 200.0)
+a = _target_angle(is3)
+assert 85 < a < 95, 'expected ~90, got %s' % a
+PLAYER.getOwnVehiclePosition = lambda: V3(0.0, 0.0, 0.0)  # restore
+# _wanted_views with ring data: the angle45 alias picks the nearest ring view
+fake_views = {'front': {}, 'v010': {}, 'v020': {}, 'v030': {}, 'v040': {}, 'v050': {},
+              'v060': {}, 'v070': {}, 'v080': {}, 'v090': {},
+              'v270': {}, 'v280': {}, 'v290': {}, 'v300': {}, 'v310': {},
+              'v320': {}, 'v330': {}, 'v340': {}, 'v350': {}}
+pm.cfg['views'] = ['front', 'angle45']
+assert pm._wanted_views(fake_views, angle=45) == ['front', 'v050'] or \
+       pm._wanted_views(fake_views, angle=45) == ['front', 'v040']
+assert pm._wanted_views(fake_views, angle=90) == ['front', 'v090']
+assert pm._wanted_views(fake_views, angle=270) == ['front', 'v270']
+# rear angle: clamped to side
+assert pm._wanted_views(fake_views, angle=150) == ['front', 'v090']
+# without angle (preview mode), falls back to rhombus (none here) => front only
+assert pm._wanted_views(fake_views) == ['front']
+# with old data (no ring views): falls back to rhombus view
+old_views = {'front': {}, 'angle20': {}, 'rear': {}}
+assert pm._wanted_views(old_views, angle=45) == ['front', 'angle20']
+assert pm._wanted_views(old_views) == ['front', 'angle20']
+# view label for ring views
+assert pm._view_label('v030') == u'30°'
+assert pm._view_label('v090') == u'90°'
+assert pm._view_label('v270') == u'270°'
+assert pm._view_label('angle20') == u'ромб 20°'
+print('angle helpers and ring-view selection: ok')
 
 # blur, hide only after hide_delay, even if a job finishes in between
 avatar.targetBlur(is3)

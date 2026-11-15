@@ -42,7 +42,7 @@ from gui.mods import penmap_core
 from gui.mods import penmap_settings
 from gui.mods import penmap_sheet
 
-__version__ = '0.5.3'
+__version__ = '0.6.0'
 
 CONFIG_PATH = os.path.join('mods', 'configs', 'penmap', 'penmap.json')
 DEFAULTS = {
@@ -147,6 +147,85 @@ def _save_config(root, cfg):
     if os.path.exists(path):
         os.remove(path)
     os.rename(tmp, path)
+
+
+def _is_ring_view(name):
+    """'v000', 'v030', ..., 'v330' -> True."""
+    return len(name) == 4 and name[0] == 'v' and name[1:].isdigit()
+
+
+def _view_angle(name):
+    """Map a view name to its azimuth in degrees (0=front, 180=rear)."""
+    if _is_ring_view(name):
+        return int(name[1:])
+    if name == 'front':
+        return 0
+    if name == 'rear':
+        return 180
+    if name.startswith('angle'):
+        try:
+            return int(name[5:])
+        except ValueError:
+            pass
+    return 0
+
+
+def _angular_dist(a, b):
+    """Smallest angle between two azimuths, 0..180 degrees."""
+    d = abs(a - b) % 360
+    return d if d <= 180 else 360 - d
+
+
+def _clamp_angle(angle):
+    """Clamp an azimuth into the front hemisphere (0..90 and 270..360).
+
+    The rear hemisphere (91..269) has thin armour on every vehicle, so the data only covers the
+    front half.  Angles beyond 90 are clamped to the nearest side view (90 or 270).
+    """
+    angle = angle % 360
+    if 90 < angle <= 180:
+        return 90.0
+    if 180 < angle < 270:
+        return 270.0
+    return angle
+
+
+def _nearest_view(views, angle):
+    """The view name from views closest to angle degrees (clamped to front hemisphere)."""
+    angle = _clamp_angle(angle)
+    return min(views, key=lambda v: _angular_dist(_view_angle(v), angle))
+
+
+def _target_angle(entity):
+    """Azimuth [0, 360) of the player relative to the target's forward.
+
+    0 = player directly in front, 90 = right side, 180 = rear, 270 = left side.
+    Uses the horizontal projection of entity.forward and the direction from the target to the player.
+    """
+    try:
+        own = BigWorld.player().getOwnVehiclePosition()
+        dx = own.x - entity.position.x
+        dz = own.z - entity.position.z
+        dlen = math.sqrt(dx * dx + dz * dz)
+        if dlen < 0.001:
+            return 0.0
+        try:
+            fwd = entity.forward
+        except AttributeError:
+            return 0.0
+        fx, fz = fwd.x, fwd.z
+        flen = math.sqrt(fx * fx + fz * fz)
+        if flen < 0.001:
+            return 0.0
+        cos_a = max(-1.0, min(1.0, (dx * fx + dz * fz) / (dlen * flen)))
+        angle = math.acos(cos_a) * 180.0 / math.pi
+        # cross product Y component: positive when the player is to the target's RIGHT
+        cross_y = dx * fz - dz * fx
+        if cross_y < 0:
+            angle = 360.0 - angle
+        return angle
+    except Exception:
+        return 0.0
 
 
 class Overlay(object):
@@ -395,20 +474,27 @@ class PenMap(object):
 
     @staticmethod
     def _view_label(view):
+        if _is_ring_view(view):
+            deg = str(int(view[1:]))
+            return u'%s°' % deg
         if view.startswith('angle'):
             return u'ромб %s°' % view[5:]
         return VIEW_LABELS.get(view, view)
 
-    def _wanted_views(self, views):
+    def _wanted_views(self, views, angle=None):
+        ring = [v for v in views if _is_ring_view(v)]
         wanted = []
         for v in self.cfg['views']:
             if v not in views and v in RHOMBUS_ALIASES:
-                v = self._rhombus(views) or v
+                if ring and angle is not None:
+                    v = _nearest_view(ring, angle)
+                else:
+                    v = self._rhombus(views) or v
             if v in views and v not in wanted:
                 wanted.append(v)
         return wanted or ['front']
 
-    def request(self, vdesc, distance):
+    def request(self, vdesc, distance, angle=None):
         """Show the map for vdesc at distance: from cache right away, otherwise via a sliced job."""
         own = BigWorld.player().getVehicleDescriptor()
         tags = getattr(own.type, 'tags', None)
@@ -424,10 +510,13 @@ class PenMap(object):
         views = self.vehicle_data(vdesc.type.name)
         if not views:
             return self._show(None)
-        wanted = self._wanted_views(views)
+        wanted = self._wanted_views(views, angle=angle)
         base = (vdesc.type.name, vdesc.turret.name, vdesc.gun.name, shell.compactDescr,
                 tuple(wanted), bool(self.cfg['discrete']), bool(self.cfg['caption']),
                 bool(self.cfg['only_hard']), self.cfg['easy_share'])
+        # color_key: view-independent key for reusing shot results across angle changes
+        color_key = (vdesc.type.name, vdesc.turret.name, vdesc.gun.name, shell.compactDescr,
+                     bool(self.cfg['discrete']))
         dist_label = int(round(distance / 10.0)) * 10
         # the caption shows the distance: a new label needs a new picture even at the same pen
         shown_dist = dist_label if self.cfg['caption'] else None
@@ -448,12 +537,14 @@ class PenMap(object):
                 return self.overlay.hide()
             return self._show(self.textures[key])
         # within the pen tolerance only the caption changed: keep the computed colors
+        # color_key omits the views so colors are reused when only the angle changes
         last = self.last_results
-        reuse = last if (last is not None and last[0] == base
+        reuse = last if (last is not None and last[0] == color_key
                          and abs(last[1] - pen) <= pen * PEN_TOLERANCE) else None
         self._cancel_job()
         self.job_req = (base, pen, shown_dist)
-        self.job = self._render_steps(vdesc, views, wanted, shell, pen, dist_label, key, reuse)
+        self.job = self._render_steps(vdesc, views, wanted, shell, pen, dist_label, key,
+                                      color_key, reuse)
         self._step_job()
 
     @staticmethod
@@ -473,9 +564,11 @@ class PenMap(object):
             infos.append(mats.get(kind) if kind is not None else None)
         return infos
 
-    def _render_steps(self, vdesc, views, wanted, shell, pen, dist_label, key, reuse=None):
+    def _render_steps(self, vdesc, views, wanted, shell, pen, dist_label, key, color_key,
+                       reuse=None):
         """Generator: each step does about SLICE seconds of work, the last one shows the result.
 
+        color_key: view-independent key for caching shot results across angle changes.
         reuse: last_results of the same target at a pen within PEN_TOLERANCE, to skip the shots."""
         shown_dist = dist_label if self.cfg['caption'] else None
         configs = dict((v, self.pick_config(views[v], vdesc.turret.name, vdesc.gun.name))
@@ -500,7 +593,7 @@ class PenMap(object):
                 if i & 127 == 127 and time.clock() > deadline:
                     yield
                     deadline = time.clock() + SLICE
-            self.last_results = (key[:-2], pen, results, colors)
+            self.last_results = (color_key, pen, results, colors)
 
         if self.cfg['only_hard']:
             front = self.pick_config(views['front'], vdesc.turret.name, vdesc.gun.name) \
@@ -915,7 +1008,8 @@ class PenMap(object):
         try:
             if t is not None:
                 dist = (t.position - BigWorld.player().getOwnVehiclePosition()).length
-                self.request(t.typeDescriptor, dist)
+                angle = _target_angle(t)
+                self.request(t.typeDescriptor, dist, angle=angle)
             elif self.preview is not None:
                 self.request(self.preview, float(self.cfg['test_distance']))
         except Exception:

@@ -165,6 +165,26 @@ def rhombus_views(angle=20):
     return (('front', 0.0), ('angle%d' % angle, -float(angle), 'hull'), ('rear', 180.0))
 
 
+def ring_views(n=10):
+    """Views from the front (0) to the side (90) on both sides, hull turned, turret facing viewer.
+
+    n is the number of steps in the 0..90 range (inclusive of both endpoints), so n=10 gives
+    every 10 degrees: 0, 10, 20 ... 90 on the right side, mirrored as 270, 280 ... 350 on the
+    left.  The rear hemisphere (91..269) is skipped: armour there is thin on every vehicle.
+    The front at 0 keeps its canonical name; the rest are v010 ... v090, v270 ... v350.
+    """
+    step = 90.0 / max(1, n - 1)
+    views = [('front', 0.0)]
+    for i in range(1, n):
+        angle = int(round(i * step))
+        views.append(('v%03d' % angle, -float(angle), 'hull'))
+    for i in range(n - 1, 0, -1):
+        angle = int(round(i * step))
+        mirror = 360 - angle
+        views.append(('v%03d' % mirror, -float(mirror), 'hull'))
+    return tuple(views)
+
+
 def rotate_y(tris, deg):
     if not deg:
         return tris
@@ -230,6 +250,8 @@ def main():
                     help='the old views: front, the whole vehicle turned by 45 degrees, rear')
     ap.add_argument('--rhombus', type=int, default=20,
                     help='front, rear and the hull turned by this angle with the turret to the front')
+    ap.add_argument('--ring', type=int, default=0,
+                    help='angle-aware ring: N views evenly spaced (e.g. 12 for every 30 degrees)')
     ap.add_argument('--min-tier', type=int, default=1, help='skip vehicles below this tier')
     ap.add_argument('--skip-classes', default='',
                     help='comma-separated list.xml class tags to skip, e.g. lightTank')
@@ -238,7 +260,12 @@ def main():
                     help='where to put material flags for offline previews (empty to skip)')
     a = ap.parse_args()
     only = set(filter(None, a.only.split(',')))
-    views = legacy_views() if a.legacy else rhombus_views(a.rhombus)
+    if a.ring > 0:
+        views = ring_views(a.ring)
+    elif a.legacy:
+        views = legacy_views()
+    else:
+        views = rhombus_views(a.rhombus)
     import build_mod
     include = build_mod.vehicle_filter(a.min_tier, set(filter(None, a.skip_classes.split(','))))
     total, failed, t0 = 0, [], time.time()
