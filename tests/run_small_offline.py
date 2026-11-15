@@ -239,9 +239,10 @@ with open(GM_CFG, 'w') as f:
 import mod_gun_marks  # noqa: E402
 mod_gun_marks.init()
 gm = mod_gun_marks.g_mod
-assert (gm.cfg['anchor'], gm.cfg['min_level']) == ('top_right', 6), gm.cfg
+assert (gm.cfg['anchor'], gm.cfg['offset_x'], gm.cfg['min_level']) == ('top_right', 140, 6), gm.cfg
 with open(GM_CFG) as f:
-    assert json.load(f)['anchor'] == 'top_right'
+    saved = json.load(f)
+    assert saved['anchor'] == 'top_right' and saved['offset_x'] == 140
 gm.cfg['min_level'] = 5
 EVENTS.onAccountShowGUI()
 eff = Obj(onTotalEfficiencyUpdated=Event())
