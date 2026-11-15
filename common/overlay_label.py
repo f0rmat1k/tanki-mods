@@ -79,6 +79,66 @@ def render(font, lines):
     return png_rgba(w, h, px), w, h
 
 
+# --- Extended rendering helpers (for mods that build custom panels) ---
+
+
+def text_width(font, text, scale=1):
+    """Width of text in pixels at the given scale."""
+    return font.width(text) * scale
+
+
+def text_height(font, scale=1):
+    """Height of a line of text in pixels at the given scale."""
+    return font.height * scale
+
+
+def make_buffer(w, h, bg=None):
+    """Create a w*h RGBA pixel buffer filled with the background color."""
+    if bg is None:
+        bg = BG
+    return bytearray(struct.pack('4B', *bg) * (w * h))
+
+
+def draw_text(buf, buf_w, font, text, x, y, rgb, scale=1):
+    """Draw a string into an RGBA buffer at (x, y).  Returns the pixel width consumed."""
+    cx = x
+    for ch in text:
+        g = font.glyph(ch)
+        if g is None:
+            continue
+        gw, bits = g
+        for gy in range(font.height):
+            row_src = gy * gw
+            for gx in range(gw):
+                a = bits[row_src + gx]
+                if not a:
+                    continue
+                k = a / 255.0
+                for sy in range(scale):
+                    for sx in range(scale):
+                        i = ((y + gy * scale + sy) * buf_w + cx + gx * scale + sx) * 4
+                        buf[i] = int(buf[i] + (rgb[0] - buf[i]) * k)
+                        buf[i + 1] = int(buf[i + 1] + (rgb[1] - buf[i + 1]) * k)
+                        buf[i + 2] = int(buf[i + 2] + (rgb[2] - buf[i + 2]) * k)
+                        buf[i + 3] = max(buf[i + 3], a)
+        cx += gw * scale
+    return cx - x
+
+
+def draw_rect(buf, buf_w, x, y, w, h, rgba):
+    """Fill a rectangle with an RGBA color (alpha-blended into the buffer)."""
+    r, g, b = rgba[0], rgba[1], rgba[2]
+    a = rgba[3] if len(rgba) > 3 else 255
+    ka = a / 255.0
+    for row in range(h):
+        for col in range(w):
+            i = ((y + row) * buf_w + x + col) * 4
+            buf[i] = int(buf[i] + (r - buf[i]) * ka)
+            buf[i + 1] = int(buf[i + 1] + (g - buf[i + 1]) * ka)
+            buf[i + 2] = int(buf[i + 2] + (b - buf[i + 2]) * ka)
+            buf[i + 3] = max(buf[i + 3], a)
+
+
 ANCHORS = ('top', 'bottom', 'top_left', 'top_right', 'bottom_left', 'bottom_right')
 
 
@@ -112,8 +172,6 @@ class Label(object):
         self.last = None
 
     def show(self, lines, anchor, offset_x, offset_y):
-        import GUI
-        import ResMgr
         if self.font is None or not self.cache_dir:
             return
         if lines == self.last and self.comp is not None:
@@ -121,6 +179,18 @@ class Label(object):
             return
         self.last = lines
         png, w, h = render(self.font, lines)
+        self._display(png, w, h, anchor, offset_x, offset_y)
+
+    def show_png(self, png, w, h, anchor, offset_x, offset_y):
+        """Show a pre-rendered PNG (for mods that build custom panels)."""
+        if not self.cache_dir:
+            return
+        self.last = None
+        self._display(png, w, h, anchor, offset_x, offset_y)
+
+    def _display(self, png, w, h, anchor, offset_x, offset_y):
+        import GUI
+        import ResMgr
         self.counter += 1
         name = '%s_%d_%d.png' % (self.name, os.getpid(), self.counter)
         with open(os.path.join(self.cache_dir, name), 'wb') as f:

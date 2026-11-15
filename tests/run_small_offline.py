@@ -250,8 +250,8 @@ PLAYER['p'] = Obj(playerVehicleID=1, guiSessionProvider=Obj(shared=Obj(ammo=ammo
                   arena=Obj(vehicles={1: {'vehicleType': Obj(type=Obj(compactDescr=VEH, level=10))}}))
 # the first battle on the vehicle: no history yet, so no estimate for 85 %
 EVENTS.onAvatarReady()
-text = u''.join(t for line in gm.lines() for t, _ in line)
-assert u'72,35' in text and u'Для расчёта' in text, text
+data = gm.panel_data()
+assert data['percent'] == 72.35 and data['delta'] is None, data
 save_panel('gun_marks_first')
 EVENTS.onAvatarBecomeNonPlayer()
 # a battle later the dossier has moved: the slope gives the damage for 85 %
@@ -263,8 +263,9 @@ EVENTS.onAvatarReady()
 eff.onTotalEfficiencyUpdated({E.DAMAGE: 2400, E.ASSIST_DAMAGE: 600, E.BLOCKED_DAMAGE: 900})
 est = gun_marks_calc.estimate(3160, 74.0, history)
 assert est['target'] == 85.0 and est['need'] > 3160, est
-text = u''.join(t for line in gm.lines() for t, _ in line)
-assert u'До 75 %' in text and u'до 85 %' in text and u'3 000' in text, text
+data = gm.panel_data()
+assert data['percent'] == 74.0 and data['target'] == 85.0, data
+assert data['combined'] == 3000 and data['delta'] is not None, data
 save_panel('gun_marks')
 EVENTS.onAvatarBecomeNonPlayer()
 print('gun_marks: ok, need %d for 85 %%' % est['need'])

@@ -19,7 +19,7 @@ from PlayerEvents import g_playerEvents
 from gui.mods import gun_marks_calc as calc
 from gui.mods import gun_marks_label as label
 
-__version__ = '0.2.1'
+__version__ = '0.3.0'
 
 MOD_ID = 'gun_marks'
 CONFIG_DIR = os.path.join('mods', 'configs', MOD_ID)
@@ -38,6 +38,11 @@ OLD_POSITIONS = [
 ]
 FONT = 'mods/%s/font.bin' % MOD_ID
 WHITE, GRAY, GOLD, GREEN = (235, 230, 215), (160, 156, 148), (250, 200, 70), (120, 210, 120)
+RED = (230, 70, 70)
+BAR_BG = (80, 30, 30, 200)
+BAR_FG = (50, 180, 70, 230)
+BAR_H = 8
+SCALE_BIG = 2
 
 
 def log(*args):
@@ -198,32 +203,88 @@ class GunMarks(object):
         t = self.totals
         return t.get(E.DAMAGE, 0) + t.get(E.ASSIST_DAMAGE, 0) + t.get(E.STUN, 0)
 
-    def lines(self):
+    def panel_data(self):
+        """Structured data for the panel (also used in tests)."""
         _, entry = self.vehicle
         est = calc.estimate(entry['avg'], entry['percent'], entry['history'])
-        marks = entry.get('marks') or 0
-        lines = [[(u'Отметки: ', GRAY), (u'%d · %s %%' % (marks, _pct(entry['percent'])), GOLD)]]
-        keep = [(u'держать: ', GRAY), (_num(est['keep']), WHITE)]
-        if est['step_need'] is None:
-            lines.append([(u'Для расчёта нужно ещё %d бой(я) на танке с модом   ' %
-                           est['battles_short'], GRAY)] + keep)
-        else:
-            line = [(u'До %d %%: ' % est['step'], GRAY), (_num(est['step_need']), WHITE)]
-            if est['need'] is not None and est['target'] != est['step']:
-                line += [(u'   до %d %%: ' % est['target'], GRAY), (_num(est['need']), WHITE)]
-            lines.append(line + [(u'   ', GRAY)] + keep)
         combined = self.combined()
-        now = [(u'В бою: ', GRAY), (_num(combined), GREEN if combined >= est['keep'] else WHITE)]
-        after = calc.projected_percent(entry['avg'], entry['percent'], entry['history'], combined)
-        if after is not None:
-            now.append((u'   итог ~%s %%' % _pct(after), GRAY))
-        lines.append(now)
-        return lines
+        projected = calc.projected_percent(
+            entry['avg'], entry['percent'], entry['history'], combined)
+        percent = entry['percent']
+        delta = (projected - percent) if projected is not None else None
+        need = est['step_need'] if est['step_need'] is not None else est['keep']
+        target = calc.next_mark(percent)
+        if target is not None:
+            prev = 0.0
+            for m in calc.MARKS:
+                if m <= percent:
+                    prev = m
+            fill = (percent - prev) / (target - prev) if target > prev else 1.0
+        else:
+            fill = 1.0
+        return {'percent': percent, 'delta': delta, 'combined': combined,
+                'need': need, 'keep': est['keep'], 'step': est['step'],
+                'target': target, 'projected': projected, 'fill': fill}
+
+    def build_panel(self):
+        """Build the panel PNG: big %, delta, progress bar, combined/need damage."""
+        d = self.panel_data()
+        font = self.label.font
+        # Row 1: big percent + delta
+        pct_text = u'%s%%' % _pct(d['percent'])
+        pct_w = label.text_width(font, pct_text, SCALE_BIG)
+        pct_h = label.text_height(font, SCALE_BIG)
+        gap = 8
+        if d['delta'] is not None:
+            if d['delta'] >= 0:
+                delta_text = u'+%s%%' % _pct(d['delta'])
+                delta_color = GREEN
+            else:
+                delta_text = u'%s%%' % _pct(d['delta'])
+                delta_color = RED
+            delta_w = label.text_width(font, delta_text)
+        else:
+            delta_text = u''
+            delta_w = 0
+            delta_color = GRAY
+        row1_w = pct_w + (gap + delta_w if delta_text else 0)
+        # Row 3: damage
+        dmg_label = u'Сум. урон: '
+        dmg_value = u'%s / %s' % (_num(d['combined']), _num(d['need']))
+        dmg_label_w = label.text_width(font, dmg_label)
+        dmg_value_w = label.text_width(font, dmg_value)
+        row3_w = dmg_label_w + dmg_value_w
+        # Image size
+        content_w = max(row1_w, row3_w)
+        img_w = content_w + 2 * label.PAD_X
+        bar_w = content_w
+        img_h = (label.PAD_Y + pct_h + label.LINE_GAP + BAR_H + label.LINE_GAP +
+                 label.text_height(font) + label.PAD_Y)
+        buf = label.make_buffer(img_w, img_h)
+        y = label.PAD_Y
+        x = label.PAD_X
+        # Row 1: big percent + delta
+        label.draw_text(buf, img_w, font, pct_text, x, y, GOLD, SCALE_BIG)
+        if delta_text:
+            dy = y + (pct_h - label.text_height(font)) // 2
+            label.draw_text(buf, img_w, font, delta_text, x + pct_w + gap, dy, delta_color)
+        y += pct_h + label.LINE_GAP
+        # Row 2: progress bar
+        label.draw_rect(buf, img_w, x, y, bar_w, BAR_H, BAR_BG)
+        filled = max(1, int(bar_w * d['fill']))
+        label.draw_rect(buf, img_w, x, y, filled, BAR_H, BAR_FG)
+        y += BAR_H + label.LINE_GAP
+        # Row 3: damage
+        label.draw_text(buf, img_w, font, dmg_label, x, y, GRAY)
+        dmg_color = GREEN if d['combined'] >= d['keep'] else WHITE
+        label.draw_text(buf, img_w, font, dmg_value, x + dmg_label_w, y, dmg_color)
+        return label.png_rgba(img_w, img_h, buf), img_w, img_h
 
     def draw(self):
         if self.vehicle is None or self.label is None:
             return
-        self.label.show(self.lines(), self.cfg['anchor'], self.cfg['offset_x'], self.cfg['offset_y'])
+        png, w, h = self.build_panel()
+        self.label.show_png(png, w, h, self.cfg['anchor'], self.cfg['offset_x'], self.cfg['offset_y'])
 
     def on_battle_end(self):
         try:
