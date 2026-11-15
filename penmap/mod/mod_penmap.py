@@ -42,7 +42,7 @@ from gui.mods import penmap_core
 from gui.mods import penmap_settings
 from gui.mods import penmap_sheet
 
-__version__ = '0.6.0'
+__version__ = '0.6.1'
 
 CONFIG_PATH = os.path.join('mods', 'configs', 'penmap', 'penmap.json')
 DEFAULTS = {
@@ -197,10 +197,10 @@ def _nearest_view(views, angle):
 
 
 def _target_angle(entity):
-    """Azimuth [0, 360) of the player relative to the target's forward.
+    """Азимут [0, 360) игрока относительно носа корпуса цели.
 
-    0 = player directly in front, 90 = right side, 180 = rear, 270 = left side.
-    Uses the horizontal projection of entity.forward and the direction from the target to the player.
+    0 = игрок прямо перед носом, 90 = справа, 180 = сзади, 270 = слева.
+    Использует entity.yaw (yaw корпуса в радианах; 0 = +Z, растёт по часовой сверху).
     """
     try:
         own = BigWorld.player().getOwnVehiclePosition()
@@ -209,17 +209,13 @@ def _target_angle(entity):
         dlen = math.sqrt(dx * dx + dz * dz)
         if dlen < 0.001:
             return 0.0
-        try:
-            fwd = entity.forward
-        except AttributeError:
-            return 0.0
-        fx, fz = fwd.x, fwd.z
-        flen = math.sqrt(fx * fx + fz * fz)
-        if flen < 0.001:
-            return 0.0
-        cos_a = max(-1.0, min(1.0, (dx * fx + dz * fz) / (dlen * flen)))
+        # entity.yaw — yaw корпуса в радианах; sin/cos дают горизонтальную проекцию
+        yaw = entity.yaw
+        fx = math.sin(yaw)
+        fz = math.cos(yaw)
+        cos_a = max(-1.0, min(1.0, (dx * fx + dz * fz) / dlen))
         angle = math.acos(cos_a) * 180.0 / math.pi
-        # cross product Y component: positive when the player is to the target's RIGHT
+        # Y-компонента cross product: > 0 когда игрок СПРАВА от оси корпуса цели
         cross_y = dx * fz - dz * fx
         if cross_y < 0:
             angle = 360.0 - angle

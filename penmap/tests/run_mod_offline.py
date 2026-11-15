@@ -264,11 +264,11 @@ class Vehicle(object):
     publicInfo = {'team': 2}
     isStarted = True
 
-    def __init__(self, vid, vdesc, pos, forward=None):
+    def __init__(self, vid, vdesc, pos, yaw=0.0):
         self.id = vid
         self.typeDescriptor = vdesc
         self.position = pos
-        self.forward = forward or V3(0.0, 0.0, 1.0)
+        self.yaw = yaw  # hull yaw в радианах: 0 = нос на +Z, pi/2 = нос на +X
         ENTITIES[vid] = self
 
     def isAlive(self):
@@ -430,15 +430,30 @@ assert _nearest_view(ring, 90) == 'v090'
 assert _nearest_view(ring, 180) == 'v090'   # clamped to 90
 assert _nearest_view(ring, 200) == 'v270'   # clamped to 270
 assert _nearest_view(ring, 270) == 'v270'
-# _target_angle: player at (0,0,0), target at (0,0,200) facing +z  => player directly behind (180)
+# _target_angle: player at (0,0,0), target at (0,0,200) yaw=0 (нос на +Z) => player сзади (180)
 is3.position = V3(0.0, 0.0, 200.0)
-is3.forward = V3(0.0, 0.0, 1.0)
+is3.yaw = 0.0  # нос на +Z
 a = _target_angle(is3)
 assert 175 < a < 185, 'expected ~180, got %s' % a
-# player at (200, 0, 200), target at (0,0,200) facing +z => player to the right (90)
+# player at (200, 0, 200), target at (0,0,200) yaw=0 => player справа (90)
 PLAYER.getOwnVehiclePosition = lambda: V3(200.0, 0.0, 200.0)
 a = _target_angle(is3)
 assert 85 < a < 95, 'expected ~90, got %s' % a
+# player at (-200, 0, 200), yaw=0 => player слева (270)
+PLAYER.getOwnVehiclePosition = lambda: V3(-200.0, 0.0, 200.0)
+a = _target_angle(is3)
+assert 265 < a < 275, 'expected ~270, got %s' % a
+# player at (0, 0, 300), yaw=0 => player прямо перед носом (0)
+PLAYER.getOwnVehiclePosition = lambda: V3(0.0, 0.0, 300.0)
+a = _target_angle(is3)
+assert a < 5 or a > 355, 'expected ~0, got %s' % a
+# yaw=pi/2 (нос на +X), player at (200, 0, 200) => прямо перед носом (0)
+import math as _math
+is3.yaw = _math.pi / 2.0
+PLAYER.getOwnVehiclePosition = lambda: V3(200.0, 0.0, 200.0)
+a = _target_angle(is3)
+assert a < 5 or a > 355, 'expected ~0 (nose on +X, player on +X), got %s' % a
+is3.yaw = 0.0
 PLAYER.getOwnVehiclePosition = lambda: V3(0.0, 0.0, 0.0)  # restore
 # _wanted_views with ring data: the angle45 alias picks the nearest ring view
 fake_views = {'front': {}, 'v010': {}, 'v020': {}, 'v030': {}, 'v040': {}, 'v050': {},
