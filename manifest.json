@@ -33,12 +33,12 @@
       "dirs": [
         "res_mods/{client}/mods/gun_marks_cache"
       ],
-      "file": "gun_marks_0.2.1.mtmod",
+      "file": "gun_marks_0.3.0.mtmod",
       "name": "Отметки на стволе",
-      "sha256": "8cb8d02c103120f913c9757a5e0faab731e5e564da82a5097864ced1302af737",
-      "size": 44276,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/gun_marks-v0.2.1/gun_marks_0.2.1.mtmod",
-      "version": "0.2.1"
+      "sha256": "b63e6982166806849209e9152b73bbd8e213eeb09d2ca8ee01364c7b404db598",
+      "size": 48801,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/gun_marks-v0.3.0/gun_marks_0.3.0.mtmod",
+      "version": "0.3.0"
     },
     "nearyou_ranks": {
       "description": "Ранг и сложность танка из тир-листа Near_You в карусели ангара; фильтр в поиске: #S, #A+, #лёгкий",
