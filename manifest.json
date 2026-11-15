@@ -55,12 +55,12 @@
       "dirs": [
         "res_mods/{client}/mods/penmap_cache"
       ],
-      "file": "penmap_0.6.0.mtmod",
+      "file": "penmap_0.6.1.mtmod",
       "name": "Карта пробития",
-      "sha256": "84e7d80f3a2e7567ea431a4e3f5f9e5719103a1ee535d52b154acc1831b6b47a",
-      "size": 296375950,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap-v0.6.0/penmap_0.6.0.mtmod",
-      "version": "0.6.0"
+      "sha256": "971c2f7cff7d49d899117723cf3133e5728b8f8e8cf0c273611745f12f2837af",
+      "size": 296375945,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap-v0.6.1/penmap_0.6.1.mtmod",
+      "version": "0.6.1"
     },
     "shell_cost": {
       "description": "В бою: сколько серебра ушло на выстрелы",
