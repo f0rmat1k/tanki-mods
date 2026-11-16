@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """Python 2.7 smoke test of mod_penmap with stubbed game modules.
 
-Run: C:\\Python27\\python.exe tests\\run_mod_offline.py [path\\to\\penmap.mtmod]
-Data and font are read from the given .mtmod (default: the one installed in the game).
+Run: C:\\Python27\\python.exe tests\\run_mod_offline.py [package.mtmod ...]
+Data and font are read from the given packages (default: the newest penmap_<version>.mtmod and
+penmap_data_<version>.mtmod in build/), as the game merges every .mtmod into one res tree.
 """
 import glob
 import json
+import re
 import os
 import shutil
 import sys
@@ -20,12 +22,23 @@ sys.path.insert(0, TOOL)
 import preview  # noqa: E402  (offline game-rule implementations)
 sys.path.insert(0, HERE)
 
-MTMOD = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob(r'G:\Tanki\mods\*\penmap_*.mtmod'))[-1]
+
+def newest(prefix):
+    """The highest-versioned build/<prefix><version>.mtmod."""
+    found = []
+    for p in glob.glob(os.path.join(TOOL, 'build', prefix + '*.mtmod')):
+        m = re.match(re.escape(prefix) + r'(\d+(?:\.\d+)*)\.mtmod$', os.path.basename(p))
+        if m:
+            found.append(([int(x) for x in m.group(1).split('.')], p))
+    return max(found)[1]
+
+
+MTMODS = sys.argv[1:] or [newest('penmap_'), newest('penmap_data_')]
 TEMP = tempfile.mkdtemp(prefix='penmap_test_')
 # the game folder may have a Cyrillic name ("F:\Танки\Tanki"): os.getcwd() is then cp1251 bytes
 ROOT = os.path.join(TEMP, '\xd2\xe0\xed\xea\xe8')
 os.makedirs(os.path.join(ROOT, 'res_mods', '1.46.0.0'))
-PKG = zipfile.ZipFile(MTMOD)
+PKGS = [zipfile.ZipFile(m) for m in MTMODS]
 
 
 def module(name, **attrs):
@@ -71,9 +84,13 @@ LOADS = []
 def open_section(path):
     if path == '../paths.xml':
         return Section()
-    try:
-        data = PKG.read('res/' + path)
-    except KeyError:
+    for pkg in PKGS:
+        try:
+            data = pkg.read('res/' + path)
+            break
+        except KeyError:
+            pass
+    else:
         return None
     LOADS.append(path)
     return Section(data=data)
@@ -130,7 +147,7 @@ class NotificationsActionsHandlers(object):
 
 module('notification')
 module('notification.actions_handlers', NotificationsActionsHandlers=NotificationsActionsHandlers)
-SYSTEM_MESSAGES = module('gui.SystemMessages', SM_TYPE=preview.Obj(Information='Information'),
+SYSTEM_MESSAGES = module('gui.SystemMessages', SM_TYPE=preview.Obj(Information='Information', Warning='Warning'),
                          pushMessage=lambda text, type: PUSHED.append((text, type)))
 
 

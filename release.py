@@ -28,6 +28,17 @@ MODS = {
                        u'танку перед боем. Ctrl+Shift+P — настройки в ангаре',
         # paths.xml mounts res_mods with cacheSubdirs: the picture folder must exist before start
         'dirs': ['res_mods/{client}/mods/penmap_cache'],
+        'requires': ['penmap_data'],
+    },
+    # penmap's vehicle data in its own package: re-released only after a re-export, so a code fix
+    # does not download it again; launchers since 1.5.0 install it with penmap and do not list it
+    'penmap_data': {
+        'version_file': 'penmap/data_version.py',
+        'built': 'penmap/build/penmap_data_{version}.mtmod',
+        'name': u'Карта пробития — данные',
+        'description': u'Данные брони танков для «Карты пробития». Нужны вместе с ней',
+        'dirs': [],
+        'hidden': True,
     },
     'nearyou_ranks': {
         'version_file': 'nearyou_ranks/mod/mod_nearyou.py',
@@ -188,6 +199,9 @@ def main():
         manifest['launcher'] = entry
     else:
         entry.update(name=spec['name'], description=spec['description'], dirs=spec['dirs'])
+        for key in ('requires', 'hidden'):
+            if key in spec:
+                entry[key] = spec[key]
         manifest['mods'][a.mod] = entry
     save_manifest(manifest, 'Release %s' % tag)
     print('released', tag, url)

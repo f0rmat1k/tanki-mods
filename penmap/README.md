@@ -65,7 +65,8 @@
 | [hktag.py](hktag.py), [havok_mesh.py](havok_mesh.py) | Чтение Havok tagfile и сжатых коллизионных мешей |
 | [render.py](render.py), [preview.py](preview.py), [make_map.py](make_map.py) | Растеризация и офлайн-превью схем |
 | [make_font.py](make_font.py) | Растровый шрифт для подписи (из системного Arial Bold) |
-| [build_mod.py](build_mod.py) | Компиляция под Python 2.7 и упаковка `.mtmod`; `--install` кладёт его в игру |
+| [build_mod.py](build_mod.py) | Компиляция под Python 2.7 и упаковка двух пакетов: `penmap_<версия>.mtmod` (код и шрифт) и `penmap_data_<версия>.mtmod` (данные брони); `--install` кладёт их в игру |
+| [data_version.py](data_version.py) | Версия пакета данных: поднимать только после новой выгрузки |
 | [tests/run_mod_offline.py](tests/run_mod_offline.py) | Прогон мода в Python 2.7 на заглушках игровых модулей |
 
 ## Сборка после патча игры
@@ -78,12 +79,19 @@ python make_font.py
 ```bash
 python export.py --out build_r20/res/mods/penmap/data --dev build_full/dev --min-tier 6 --skip-classes lightTank
 ```
+Данные лежат в отдельном пакете, чтобы фикс кода не заставлял лаунчер заново качать ~400 МБ. После новой выгрузки поднимите `VERSION` в `data_version.py` и соберите оба пакета:
+
 ```bash
-python build_mod.py --data build_r20/res --install
+python build_mod.py --part all --data build_ring/res --install
 ```
 ```bash
 C:\Python27\python.exe tests\run_mod_offline.py
 ```
+```bash
+python ../release.py penmap_data
+```
+
+Для фикса кода хватает `python build_mod.py --install` (только код, около 100 КБ) и `python ../release.py penmap`.
 
 ## Ограничения
 

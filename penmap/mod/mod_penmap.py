@@ -42,7 +42,7 @@ from gui.mods import penmap_core
 from gui.mods import penmap_settings
 from gui.mods import penmap_sheet
 
-__version__ = '0.7.0'
+__version__ = '0.8.0'
 
 CONFIG_PATH = os.path.join('mods', 'configs', 'penmap', 'penmap.json')
 DEFAULTS = {
@@ -552,6 +552,13 @@ class PenMap(object):
         last = self.last_results
         reuse = last if (last is not None and last[0] == color_key
                          and abs(last[1] - pen) <= pen * PEN_TOLERANCE) else None
+        # don't cancel a running job when only the ring-view angle changed:
+        # the front is still valid, let it finish — next refresh picks up the new angle
+        if self.job is not None and self.job_req is not None:
+            ob = self.job_req[0]
+            if ob[:4] == base[:4] and ob[5:] == base[5:] \
+                    and abs(self.job_req[1] - pen) <= pen * PEN_TOLERANCE:
+                return
         self._cancel_job()
         self.job_req = (base, pen, shown_dist)
         self.job = self._render_steps(vdesc, views, wanted, shell, pen, dist_label, key,
@@ -641,6 +648,13 @@ class PenMap(object):
             c = configs[view]
             png, h = penmap_core.build_png(c, colors, caption, font, pal)
             result[view] = (self._write_png(png), c.w, h, c.res)
+            # show front immediately so it stays visible while the dynamic view renders
+            if view == 'front' and len(wanted) > 1:
+                try:
+                    ResMgr.purge(self.cache_vfs, True)
+                except Exception:
+                    pass
+                self.overlay.show(result)
         yield
         try:
             ResMgr.purge(self.cache_vfs, True)
@@ -1157,7 +1171,11 @@ def init():
         return
     # the settings window is optional: the map works without it
     try:
-        penmap_settings.install_notification(g_penmap.settings.open, log)
+        # the vehicle data comes in its own package, penmap_data_<version>.mtmod
+        data_missing = ResMgr.openSection('mods/penmap/data_version.txt') is None
+        if data_missing:
+            log('no penmap_data package: the vehicle data is missing')
+        penmap_settings.install_notification(g_penmap.settings.open, log, data_missing)
     except Exception:
         log('settings notification setup failed', traceback.format_exc())
 

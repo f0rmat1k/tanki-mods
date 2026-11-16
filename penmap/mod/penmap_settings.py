@@ -15,6 +15,9 @@ NOTIFY_TEXT = (u'<b>Карта пробития</b>\n'
                u'<a href="event:penmap_settings">Открыть '
                u'настройки</a> '
                u'(в ангаре также Ctrl+Shift+P)')
+NO_DATA_TEXT = (u'<b>Карта пробития</b>\n'
+                u'Нет данных брони танков: обновите лаунчер модов (или отметьте в нём '
+                u'«Карта пробития — данные») и нажмите «Обновить»')
 # list settings: allowed values in display order
 CHOICES = {
     'views': ('front', 'angle45', 'rear'),
@@ -272,7 +275,7 @@ class SettingsPanel(object):
         self._draw()
 
 
-def install_notification(open_window, log):
+def install_notification(open_window, log, data_missing=False):
     """A bell notification with a settings link, pushed once per session when the hangar first loads.
 
     Clicks on <a href="event:..."> links in notifications reach NotificationsActionsHandlers.handleAction.
@@ -302,6 +305,8 @@ def install_notification(open_window, log):
     def push():
         try:
             SystemMessages.pushMessage(NOTIFY_TEXT.encode('utf-8'), SystemMessages.SM_TYPE.Information)
+            if data_missing:
+                SystemMessages.pushMessage(NO_DATA_TEXT.encode('utf-8'), SystemMessages.SM_TYPE.Warning)
         except Exception:
             log('settings notification failed', traceback.format_exc())
 

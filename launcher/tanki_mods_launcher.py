@@ -36,7 +36,7 @@ import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = '1.4.0'
+VERSION = '1.5.0'
 REPO = 'f0rmat1k/tanki-mods'
 MANIFEST_URL = 'https://raw.githubusercontent.com/%s/main/manifest.json' % REPO
 RELEASES_URL = 'https://github.com/%s/releases' % REPO
@@ -383,6 +383,27 @@ def install_zip_mod(game, mods_dir, client, mod, log, progress):
     log(u'Установлен %s %s' % (mod['name'], mod['version']))
 
 
+def with_requirements(manifest, selected):
+    """selected with each hidden package (such as penmap's data) on exactly when a mod using it is on."""
+    mods = manifest['mods']
+    out = dict((k, v) for k, v in selected.items() if not mods.get(k, {}).get('hidden'))
+    for dep_id, dep in mods.items():
+        if dep.get('hidden'):
+            out[dep_id] = any(on and dep_id in mods.get(k, {}).get('requires', ())
+                              for k, on in out.items())
+    return out
+
+
+def installed_version(state, mods_dir, mod_id):
+    """The version the launcher installed, else the newest <id>_<version>.mtmod put there by hand."""
+    have = state.get(mod_id, {}).get('version')
+    if not have and mods_dir:
+        names = files_of(mods_dir, mod_id)
+        versions = [n[len(mod_id) + 1:-len('.mtmod')] for n in names]
+        have = max(versions, key=version_key) if versions else None
+    return have
+
+
 def apply_changes(game, manifest, selected, log, progress, clean_old=False):
     """Install or update the selected mods, remove the unselected ones of ours (third-party ones are
     only no longer updated), move older duplicate versions aside if clean_old. Returns the state."""
@@ -390,6 +411,7 @@ def apply_changes(game, manifest, selected, log, progress, clean_old=False):
     os.makedirs(mods_dir, exist_ok=True)
     state_file = installed_path(game)
     state = load_json(state_file, {})
+    selected = with_requirements(manifest, selected)
     for mod_id, mod in sorted(manifest['mods'].items()):
         if mod.get('kind') == 'zip':
             if selected.get(mod_id):
@@ -933,25 +955,27 @@ class Launcher(tk.Tk):
         order = sorted(self.manifest['mods'].items(),
                        key=lambda kv: (kv[1].get('kind') == 'zip', kv[1]['name']))
         for mod_id, mod in order:
+            if mod.get('hidden'):   # installed along with the mods that require it
+                continue
             third_party = mod.get('kind') == 'zip'
             if third_party:
                 have = package_version(mods_dir, mod['package']) if mods_dir else None
             else:
-                have = state.get(mod_id, {}).get('version')
-                if not have and mods_dir:
-                    # installed by hand: the version is in the file name, <id>_<version>.mtmod
-                    names = files_of(mods_dir, mod_id)
-                    versions = [n[len(mod_id) + 1:-len('.mtmod')] for n in names]
-                    have = max(versions, key=version_key) if versions else None
+                have = installed_version(state, mods_dir, mod_id)
             var = self.checks.get(mod_id)
             if var is None:
                 # a third-party mod is offered for updates only where it is already installed
                 default = chosen.get(mod_id, bool(have) if third_party else (mod_id in state or not chosen))
                 var = self.checks[mod_id] = tk.BooleanVar(value=default)
                 var.trace_add('write', lambda *a: self._refresh_summary())
+            deps_behind = any(
+                dep_id in self.manifest['mods'] and version_key(
+                    installed_version(state, mods_dir, dep_id) or '0')
+                < version_key(self.manifest['mods'][dep_id]['version'])
+                for dep_id in mod.get('requires', ()))
             if not have:
                 st = 'new'
-            elif version_key(have) < version_key(mod['version']):
+            elif version_key(have) < version_key(mod['version']) or deps_behind:
                 st = 'upd'
             else:
                 st = 'ok'

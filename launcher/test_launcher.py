@@ -87,6 +87,36 @@ def main():
             raise AssertionError('bad checksum accepted')
         assert sorted(os.listdir(mods_dir)) == ['penmap_0.5.3.mtmod', 'penmap_extra_other.mtmod', 'xvm.mtmod']
 
+        # penmap's data is a hidden package: it comes with penmap and is not downloaded again
+        # when only the code changes
+        data = make_file(os.path.join(src, 'penmap_data_1.mtmod'), b'D' * 300000)
+        data.update(name='Карта пробития — данные', version='1', description='', dirs=[],
+                    hidden=True)
+        code = make_file(os.path.join(src, 'penmap_0.8.0.mtmod'), b'C' * 1000)
+        code.update(penmap, **code)
+        code.update(version='0.8.0', requires=['penmap_data'])
+        split = {'schema': 1, 'mods': {'penmap': code, 'penmap_data': data}}
+        assert L.with_requirements(split, {'penmap': True}) == {'penmap': True, 'penmap_data': True}
+        assert L.with_requirements(split, {'penmap': False, 'penmap_data': True}) == \
+            {'penmap': False, 'penmap_data': False}
+        del log[:]
+        L.apply_changes(game, split, {'penmap': True}, log.append, lambda *a: None)
+        assert sorted(os.listdir(mods_dir)) == ['penmap_0.8.0.mtmod', 'penmap_data_1.mtmod',
+                                                'penmap_extra_other.mtmod', 'xvm.mtmod']
+        code2 = make_file(os.path.join(src, 'penmap_0.8.1.mtmod'), b'c' * 1000)
+        code2.update(dict(code, **code2), version='0.8.1')
+        split['mods']['penmap'] = code2
+        del log[:]
+        L.apply_changes(game, split, {'penmap': True}, log.append, lambda *a: None)
+        assert [m for m in log if u'Скачиваю' in m] == [u'Скачиваю Карта пробития 0.8.1…'], log
+        assert sorted(os.listdir(mods_dir)) == ['penmap_0.8.1.mtmod', 'penmap_data_1.mtmod',
+                                                'penmap_extra_other.mtmod', 'xvm.mtmod']
+        L.apply_changes(game, split, {'penmap': False}, log.append, lambda *a: None)
+        assert sorted(os.listdir(mods_dir)) == ['penmap_extra_other.mtmod', 'xvm.mtmod']
+        state = L.load_json(L.installed_path(game), {})
+        assert 'penmap' not in state and 'penmap_data' not in state, state
+        L.apply_changes(game, manifest, {'penmap': True}, log.append, lambda *a: None)
+
         # "Играть" starts Tanki.exe from the game folder, like the Game Center
         started = []
         os.environ['_PYI_APPLICATION_HOME_DIR'] = 'C:/Temp/_MEI123'   # what a frozen launcher has
