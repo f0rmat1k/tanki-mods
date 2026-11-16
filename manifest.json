@@ -55,12 +55,15 @@
       "dirs": [
         "res_mods/{client}/mods/penmap_cache"
       ],
-      "file": "penmap_0.7.1.mtmod",
+      "file": "penmap_0.8.0.mtmod",
       "name": "Карта пробития",
-      "sha256": "66fa21feac5053aaf8578f48acfaf9f5507499861938273d2fe7303fe168f61b",
-      "size": 401708082,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap-v0.7.1/penmap_0.7.1.mtmod",
-      "version": "0.7.1"
+      "requires": [
+        "penmap_data"
+      ],
+      "sha256": "aae5aa8a25d58d93984a36f3dfa079596c8792d9a942485b4b696bebbdda8009",
+      "size": 113565,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap-v0.8.0/penmap_0.8.0.mtmod",
+      "version": "0.8.0"
     },
     "penmap_data": {
       "description": "Данные брони танков для «Карты пробития». Нужны вместе с ней",
