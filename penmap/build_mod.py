@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import zipfile
 
 import data_version
@@ -69,6 +70,8 @@ def vehicle_filter(min_tier, skip_classes):
         level, tags = entry
         return level >= min_tier and not (tags & skip_classes)
 
+    # the vehicles the game lists that should have data ('xmlns:...' entries are not vehicles)
+    include.listed = [k for k in info if ':' not in k[1] and include(*k)]
     return include
 
 
@@ -109,6 +112,25 @@ def build_data(out_dir, data_root, include):
     """penmap_data_<data version>.mtmod: the vehicle armor data, released only when it changes."""
     version = data_version.VERSION
     target = os.path.join(out_dir, '%s_%s.mtmod' % (DATA_ID, version))
+    # every packed vehicle must have the front view the mod needs, and the game's own list says
+    # which vehicles should be there: comparing exports with each other misses ones absent from all
+    sys.path.insert(0, os.path.join(HERE, 'mod'))
+    import penmap_core
+    have, no_front = set(), []
+    for dirpath, _, files in os.walk(os.path.join(data_root, 'data')):
+        nation = os.path.basename(dirpath)
+        for f in files:
+            if f.endswith('.bin') and include(nation, f[:-4]):
+                have.add((nation, f[:-4]))
+                with open(os.path.join(dirpath, f), 'rb') as fh:
+                    if 'front' not in penmap_core.read_vehicle(fh.read()):
+                        no_front.append('%s:%s' % (nation, f[:-4]))
+    if no_front:
+        raise SystemExit('no front view (re-export with export.py --ring 10): %s'
+                         % ', '.join(sorted(no_front)))
+    missing = sorted('%s:%s' % v for v in set(include.listed) - have)
+    if missing:
+        print('WARNING: %d vehicles of the game have no data: %s' % (len(missing), ', '.join(missing)))
     n_data = 0
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_STORED) as z:
         zip_entry(z, 'meta.xml', META % (DATA_ID, version, 'Penetration map data',

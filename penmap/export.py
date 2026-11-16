@@ -165,6 +165,9 @@ def rhombus_views(angle=20):
     return (('front', 0.0), ('angle%d' % angle, -float(angle), 'hull'), ('rear', 180.0))
 
 
+RING_FALLBACK = (6, 4, 3, 1)   # every 18, 30, 45 degrees, then the front alone
+
+
 def ring_views(n=10):
     """Views from the front (0) to the side (90) on both sides, hull turned, turret facing viewer.
 
@@ -272,12 +275,25 @@ def main():
     for nation, name in vehicle_list(only):
         if not include(nation, name):
             continue
-        try:
-            mats = {} if a.dev else None
-            data = export_vehicle(nation, name, a.res, a.side_res, mats, views=views)
-        except Exception as e:  # vehicles without collision models, broken defs, etc.
-            failed.append('%s/%s: %s: %s' % (nation, name, type(e).__name__, e))
+        # pixels index the palette with 16 bits: a detailed vehicle runs out of entries with many
+        # ring views, so it gets fewer (the mod shows the nearest one), down to the front alone
+        attempts = [views] + [ring_views(n) for n in RING_FALLBACK if 0 < n < a.ring]
+        data = None
+        for i, attempt in enumerate(attempts):
+            try:
+                mats = {} if a.dev else None
+                data = export_vehicle(nation, name, a.res, a.side_res, mats, views=attempt)
+                break
+            except OverflowError as e:
+                if i == len(attempts) - 1:
+                    failed.append('%s/%s: %s: %s' % (nation, name, type(e).__name__, e))
+            except Exception as e:  # vehicles without collision models, broken defs, etc.
+                failed.append('%s/%s: %s: %s' % (nation, name, type(e).__name__, e))
+                break
+        if data is None:
             continue
+        if attempt is not views:
+            print('%-10s %-40s fewer views: %d' % (nation, name, len(attempt)))
         d = os.path.join(a.out, nation)
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, name + '.bin'), 'wb') as f:

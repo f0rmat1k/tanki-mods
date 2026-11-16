@@ -42,7 +42,7 @@ from gui.mods import penmap_core
 from gui.mods import penmap_settings
 from gui.mods import penmap_sheet
 
-__version__ = '0.8.0'
+__version__ = '0.8.1'
 
 CONFIG_PATH = os.path.join('mods', 'configs', 'penmap', 'penmap.json')
 DEFAULTS = {
@@ -413,6 +413,12 @@ class PenMap(object):
                     data = penmap_core.read_vehicle(sec.asBinary)
                 except Exception:
                     log('bad data for', type_name, traceback.format_exc())
+                # the 0.4 export named the front v000: everything here needs 'front'
+                if data and 'front' not in data and 'v000' in data:
+                    data['front'] = data.pop('v000')
+                if data and 'front' not in data:
+                    log('no front view for', type_name, sorted(data))
+                    data = None
             elif self.cfg['debug']:
                 log('no data for', type_name)
             self.vehicles[type_name] = data
