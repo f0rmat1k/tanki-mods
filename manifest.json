@@ -62,6 +62,17 @@
       "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap-v0.7.1/penmap_0.7.1.mtmod",
       "version": "0.7.1"
     },
+    "penmap_data": {
+      "description": "Данные брони танков для «Карты пробития». Нужны вместе с ней",
+      "dirs": [],
+      "file": "penmap_data_1.mtmod",
+      "hidden": true,
+      "name": "Карта пробития — данные",
+      "sha256": "ab864be755bece4bc099ca4e042d05ea23cb1c35d03cbb13a44a16ba0fcd71bc",
+      "size": 401595474,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/penmap_data-v1/penmap_data_1.mtmod",
+      "version": "1"
+    },
     "shell_cost": {
       "description": "В бою: сколько серебра ушло на выстрелы",
       "dirs": [
