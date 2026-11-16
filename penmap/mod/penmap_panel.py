@@ -28,7 +28,7 @@ ON_BG = (60, 150, 70, 255)
 BUTTON_BG = (59, 63, 69, 255)
 
 # 'angle45' is the config name of the rhombus, now 20° (see mod_penmap.RHOMBUS_ALIASES)
-VIEW_CHIPS = (('front', u'лоб'), ('angle45', u'ромб 20°'), ('rear', u'корма'))
+VIEW_CHIPS = (('front', u'лоб'), ('angle45', u'угол'), ('rear', u'корма'))
 CLASS_CHIPS = (('heavyTank', u'ТТ'), ('mediumTank', u'СТ'), ('AT-SPG', u'ПТ'), ('lightTank', u'ЛТ'),
                ('SPG', u'САУ'))
 

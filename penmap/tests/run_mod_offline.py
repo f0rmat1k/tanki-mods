@@ -240,7 +240,7 @@ def descr(nation, name, turret, gun, short):
                        **materials_for(nation, name, turret, gun))
 
 
-IS3 = descr('ussr', 'R19_IS-3', 'Mod_T-10', '_122mm_BL-9', u'ИС-3')
+IS3 = descr('ussr', 'R19_IS-3_FL', 'Mod_T-10_FL', '_122mm_BL-9_FL', u'ИС-3')
 TIGER = descr('germany', 'G04_PzVI_Tiger_I', 'PzVI_Porsche_Turm', '_88mm_KwK_43_L71_N', u'Tiger')
 
 
@@ -326,9 +326,9 @@ mod_penmap.init()
 pm = mod_penmap.g_penmap
 from PlayerEvents import g_playerEvents  # noqa: E402
 g_playerEvents.onAvatarReady()
-assert pm.preload == ['ussr:R19_IS-3', 'germany:G04_PzVI_Tiger_I'], pm.preload
+assert pm.preload == ['ussr:R19_IS-3_FL', 'germany:G04_PzVI_Tiger_I'], pm.preload
 run_for(1.0)
-assert sorted(pm.vehicles) == ['germany:G04_PzVI_Tiger_I', 'ussr:R19_IS-3'], pm.vehicles.keys()
+assert sorted(pm.vehicles) == ['germany:G04_PzVI_Tiger_I', 'ussr:R19_IS-3_FL'], pm.vehicles.keys()
 print('preloaded: %s, slowest load %.0f ms' % (sorted(pm.vehicles), max(s[0] for s in STEPS) * 1000))
 
 # cheat sheet: computed during the countdown, shown until the battle starts, Ctrl+Shift+P in battle
@@ -383,8 +383,8 @@ print('aim IS-3: %d frames, slowest %.1f ms, total %.0f ms' % (
     len(steps), max(steps) * 1000, sum(steps) * 1000))
 shown = visible()
 assert len(shown) == 2, shown
-rhombus = pm._rhombus(pm.vehicles['ussr:R19_IS-3'])
-assert sorted(pm.overlay.comps) == sorted(['front', rhombus]), pm.overlay.comps.keys()
+# IS-3 FL has ring data: the player is behind (angle ~180, clamped to 90) -> v090
+assert sorted(pm.overlay.comps) == sorted(['front', 'v090']), pm.overlay.comps.keys()
 
 # small distance change: same pen within tolerance and the same 10 m label -> nothing re-rendered
 before = len(pm.textures)
@@ -409,7 +409,7 @@ print('re-render on pen or caption distance change: ok')
 # angle helpers
 import math
 from mod_penmap import (_is_ring_view, _view_angle, _angular_dist, _clamp_angle,
-                        _nearest_view, _target_angle)
+                        _nearest_view, _target_angle, _snap_angle)
 assert _is_ring_view('v030') and _is_ring_view('v330') and not _is_ring_view('front')
 assert not _is_ring_view('v03') and not _is_ring_view('v0300')
 assert _view_angle('front') == 0 and _view_angle('rear') == 180 and _view_angle('v090') == 90
@@ -461,8 +461,19 @@ fake_views = {'front': {}, 'v010': {}, 'v020': {}, 'v030': {}, 'v040': {}, 'v050
               'v270': {}, 'v280': {}, 'v290': {}, 'v300': {}, 'v310': {},
               'v320': {}, 'v330': {}, 'v340': {}, 'v350': {}}
 pm.cfg['views'] = ['front', 'angle45']
-assert pm._wanted_views(fake_views, angle=45) == ['front', 'v050'] or \
-       pm._wanted_views(fake_views, angle=45) == ['front', 'v040']
+# _snap_angle: quantize to 10° steps to prevent oscillation between adjacent views
+assert _snap_angle(0) == 0 and _snap_angle(4) == 0 and _snap_angle(5) == 10
+assert _snap_angle(44) == 40 and _snap_angle(45) == 50 and _snap_angle(46) == 50
+assert _snap_angle(90) == 90
+# rear hemisphere first clamps, then rounds
+assert _snap_angle(135) == 90    # clamps to 90
+assert _snap_angle(200) == 270   # clamps to 270
+assert _snap_angle(350) == 350 and _snap_angle(355) == 360 % 360  # wraps to 0
+# _wanted_views now uses snapped angles, so nearby angles pick the same view
+assert pm._wanted_views(fake_views, angle=44) == pm._wanted_views(fake_views, angle=43)
+assert pm._wanted_views(fake_views, angle=46) == pm._wanted_views(fake_views, angle=48)
+# basic ring view selection still works
+assert pm._wanted_views(fake_views, angle=50) == ['front', 'v050']
 assert pm._wanted_views(fake_views, angle=90) == ['front', 'v090']
 assert pm._wanted_views(fake_views, angle=270) == ['front', 'v270']
 # rear angle: clamped to side
@@ -473,12 +484,31 @@ assert pm._wanted_views(fake_views) == ['front']
 old_views = {'front': {}, 'angle20': {}, 'rear': {}}
 assert pm._wanted_views(old_views, angle=45) == ['front', 'angle20']
 assert pm._wanted_views(old_views) == ['front', 'angle20']
+# front-optional: only dynamic view
+pm.cfg['views'] = ['angle45']
+w = pm._wanted_views(fake_views, angle=50)
+assert w == ['v050'], 'expected only dynamic view, got %s' % w
+pm.cfg['views'] = ['angle45']
+w = pm._wanted_views(fake_views, angle=90)
+assert w == ['v090'], w
+# front-optional: single view gets full scale in layout
+from mod_penmap import Overlay
+ov = Overlay(pm.cfg)
+img_single = {'v050': ('tex', 200, 300, 200)}
+lay = ov.layout(img_single, (1920, 1080))
+expected_scale = float(pm.cfg['scale'])
+assert abs(lay['v050'][2] - 200 * expected_scale) < 0.01, 'single view should use full scale: %s' % (lay,)
+# with front present, side view uses side_scale
+img_both = {'front': ('tex', 200, 300, 200), 'v050': ('tex', 200, 300, 200)}
+lay2 = ov.layout(img_both, (1920, 1080))
+assert lay2['v050'][2] < lay2['front'][2], 'side view should be smaller than front: %s' % (lay2,)
+pm.cfg['views'] = ['front', 'angle45']
 # view label for ring views
 assert pm._view_label('v030') == u'30°'
 assert pm._view_label('v090') == u'90°'
 assert pm._view_label('v270') == u'270°'
 assert pm._view_label('angle20') == u'ромб 20°'
-print('angle helpers and ring-view selection: ok')
+print('angle helpers, snap, ring-view selection and front-optional: ok')
 
 # blur, hide only after hide_delay, even if a job finishes in between
 avatar.targetBlur(is3)

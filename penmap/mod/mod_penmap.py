@@ -42,7 +42,7 @@ from gui.mods import penmap_core
 from gui.mods import penmap_settings
 from gui.mods import penmap_sheet
 
-__version__ = '0.6.1'
+__version__ = '0.7.0'
 
 CONFIG_PATH = os.path.join('mods', 'configs', 'penmap', 'penmap.json')
 DEFAULTS = {
@@ -224,6 +224,17 @@ def _target_angle(entity):
         return 0.0
 
 
+def _snap_angle(angle, step=10):
+    """Round an angle to the nearest step degrees after clamping to the front hemisphere.
+
+    Ring views are spaced every `step` degrees; snapping prevents oscillation between two
+    adjacent views when the real angle sits near their boundary.
+    """
+    angle = _clamp_angle(angle)
+    snapped = int(angle / float(step) + 0.5) * step
+    return snapped % 360
+
+
 class Overlay(object):
     """One GUI.Simple per view, laid out next to the screen center.
 
@@ -256,9 +267,13 @@ class Overlay(object):
         """images: {view: (tex, w, h, res)} -> {view: (x, y, w, h)} in screen pixels."""
         scale = float(self.cfg[self.scale_key])
         base_res = images['front'][3] if 'front' in images else min(i[3] for i in images.values())
+        single = len(images) == 1 and 'front' not in images
         sizes = {}
         for view, (_, w, h, res) in images.items():
-            k = scale if view == 'front' else scale * float(self.cfg['side_scale']) * res / base_res
+            if view == 'front' or single:
+                k = scale
+            else:
+                k = scale * float(self.cfg['side_scale']) * res / base_res
             sizes[view] = (w * k, h * k)
         # front at the anchor, rear to its right, other views stacked below
         fw, fh = sizes.get('front', (0.0, 0.0))
@@ -483,7 +498,7 @@ class PenMap(object):
         for v in self.cfg['views']:
             if v not in views and v in RHOMBUS_ALIASES:
                 if ring and angle is not None:
-                    v = _nearest_view(ring, angle)
+                    v = _nearest_view(ring, _snap_angle(angle))
                 else:
                     v = self._rhombus(views) or v
             if v in views and v not in wanted:
@@ -615,9 +630,10 @@ class PenMap(object):
         yield
         pal = penmap_core.palette_rgba(sample.palette, colors)
         result = {}
+        has_front = 'front' in wanted
         for view in wanted:
             yield
-            if view == 'front':
+            if view == 'front' or (not has_front and view == wanted[0]):
                 caption = u'%s  %s %d мм  %d м' % (
                     name, SHELL_LABELS.get(shell.kind, u''), int(round(pen)), dist_label)
             else:
