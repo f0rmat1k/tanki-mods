@@ -14,13 +14,19 @@ at the distance to the target. The grid becomes a small RGBA picture stretched o
     dark red   ricochet
     grey       pierced, but nothing that takes damage behind it (gun, tracks, a bare screen)
 
-Frame budget: a pass over the grid is cut into slices of `slice_ms` per frame; between passes the
-picture follows the target's box on the screen every frame. A pass is skipped while nothing moved.
+Refresh: the map is not redrawn every frame. A pass over the grid is cut into slices, one per
+frame, and the picture changes when a pass ends; between passes it follows the target's box on
+the screen every frame. `updates_per_sec` is how often a pass is wanted: the mod spends as
+little time per frame as that takes, and never more than `slice_ms`. A fine grid on a close
+target needs more than that allows, and is then refreshed as fast as `slice_ms` permits.
+A pass is skipped while nothing moved.
 
-Resolution: "quality" in the settings file picks a preset (low, medium, high, ultra: see QUALITY):
-the most cells across and down the target, the smallest cell on the screen, and the milliseconds
-of work per frame. A number in grid_w, grid_h, min_cell_px or slice_ms replaces the preset's
-value; null takes it from the preset. The file is read again at the start of every battle.
+Resolution: "quality" in the settings file picks a preset (low, medium, high, ultra, max: see
+QUALITY; max is meant for fast computers, its map is the finest and the slowest to refresh):
+the most cells across and down the target, the smallest cell on the screen, the most
+milliseconds of work per frame and the updates per second. A number in grid_w, grid_h,
+min_cell_px, slice_ms or updates_per_sec replaces the preset's value; null takes it from the
+preset. The file is read again at the start of every battle.
 
 The picture is a PNG in res_mods/<client>/mods/heatmap_cache shown with GUI.Simple. paths.xml
 mounts res_mods with cacheSubdirs, so the folder must exist before the game starts
@@ -62,20 +68,23 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
 DEFAULTS = {
-    '_help': ('quality: low, medium, high or ultra. grid_w, grid_h, min_cell_px, slice_ms: '
-              'a number replaces the value of the chosen quality, null takes it from the quality'),
+    '_help': ('quality: low, medium, high, ultra or max (max is for fast computers: the finest '
+              'map, refreshed more slowly). grid_w, grid_h (up to 512), min_cell_px, slice_ms '
+              '(most milliseconds of work per frame), updates_per_sec (map refreshes wanted per '
+              'second, 1-30): a number replaces the value of the chosen quality, null takes it '
+              'from the quality'),
     'enabled': True,
     'quality': 'high',        # the resolution preset: a key of QUALITY
     'grid_w': None,           # most cells across the target ...
     'grid_h': None,           # ... and down; cells are square, a far target gets fewer
     'min_cell_px': None,      # a cell is never smaller than this on the screen
-    'slice_ms': None,         # milliseconds of ray casting per frame
-    'refresh_period': 0.12,   # seconds between two passes, at least
+    'slice_ms': None,         # most milliseconds of ray casting per frame
+    'updates_per_sec': None,  # passes wanted per second
     'hold': 1.0,              # seconds the map stays after the crosshair left the target
     'alpha': 0.5,
     'margin': 0.10,           # yellow band: the armor is within this share of the penetration
@@ -92,19 +101,25 @@ DEFAULTS = {
     'debug': False,
 }
 
-# quality -> (grid_w, grid_h, min_cell_px, slice_ms). In the game a cell costs some 15
+# quality -> (grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec). In the game a cell costs some 15
 # microseconds, so a full grid of "high" is about 70 ms of work spread over 20 frames, a full
-# grid of "ultra" about 180 ms over 36
+# grid of "ultra" about 180 ms over 36, a full grid of "max" about 400 ms over 50: a refresh
+# every half a second or so, and 8 ms taken from every frame meanwhile. The grid is only full
+# on a target that is large on the screen: cells never get smaller than min_cell_px
 QUALITY = {
-    'low': (32, 24, 6, 2.0),
-    'medium': (48, 32, 4, 2.5),
-    'high': (80, 60, 2, 3.5),
-    'ultra': (128, 96, 1, 5.0),
+    'low': (32, 24, 6, 2.0, 5),
+    'medium': (48, 32, 4, 2.5, 8),
+    'high': (80, 60, 2, 3.5, 10),
+    'ultra': (128, 96, 1, 5.0, 10),
+    'max': (192, 144, 1, 8.0, 12),
 }
-QUALITY_ORDER = ('low', 'medium', 'high', 'ultra')
-QUALITY_KEYS = ('grid_w', 'grid_h', 'min_cell_px', 'slice_ms')
+QUALITY_ORDER = ('low', 'medium', 'high', 'ultra', 'max')
+# presets that cost frames: the panel and the log say so
+QUALITY_HEAVY = ('max',)
+QUALITY_KEYS = ('grid_w', 'grid_h', 'min_cell_px', 'slice_ms', 'updates_per_sec')
 # (lowest, highest) a setting may be, whatever the file says
-QUALITY_LIMITS = ((4, 256), (4, 256), (1.0, 64.0), (0.05, 20.0))
+QUALITY_LIMITS = ((4, 512), (4, 512), (1.0, 64.0), (0.05, 50.0), (1.0, 30.0))
+MIN_SLICE = 0.0002        # seconds: a frame of a pass does at least this much
 # 0.1.0 wrote its fixed resolution into the file: those values are not the user's choice
 LEGACY_RESOLUTION = {'grid_w': 48, 'grid_h': 32, 'min_cell_px': 4, 'slice_ms': 2.5}
 
@@ -191,6 +206,13 @@ def _load_config(root):
                 for key, value in LEGACY_RESOLUTION.items():
                     if user.get(key) == value:
                         del user[key]
+            # before 0.3.1 the pause between passes was set in seconds: keep a chosen one
+            period = user.pop('refresh_period', None)
+            if 'updates_per_sec' not in user and period not in (None, 0.12):
+                try:
+                    user['updates_per_sec'] = int(round(1.0 / float(period)))
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
             colors = user.pop('colors', None)
             cfg.update(user)
             if isinstance(colors, dict):
@@ -206,8 +228,8 @@ def _load_config(root):
 
 
 def resolution(cfg):
-    """(quality name, grid_w, grid_h, min_cell_px, slice_ms) the settings ask for: the preset
-    of cfg['quality'] with the numbers given in the file put over it."""
+    """(quality name, grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec) the settings ask
+    for: the preset of cfg['quality'] with the numbers given in the file put over it."""
     name = str(cfg.get('quality')).strip().lower()
     if name not in QUALITY:
         log('unknown quality %r: using %r (choose from %s)'
@@ -228,7 +250,7 @@ def resolution(cfg):
                 value = preset
         values.append(value)
     return (name + ' + own numbers' if custom else name, int(values[0]), int(values[1]),
-            float(values[2]), float(values[3]))
+            float(values[2]), float(values[3]), float(values[4]))
 
 
 def _save_config(root, cfg):
@@ -539,11 +561,12 @@ P_BOX = (52, 56, 61, 255)
 P_EDGE = (96, 100, 106, 255)
 P_ON = (60, 150, 70, 255)
 P_BUTTON = (59, 63, 69, 255)
-QUALITY_LABELS = {'low': u'низкое', 'medium': u'среднее', 'high': u'высокое', 'ultra': u'ультра'}
+QUALITY_LABELS = {'low': u'низкое', 'medium': u'среднее', 'high': u'высокое', 'ultra': u'ультра',
+                  'max': u'макс'}
 LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
-PANEL_DEFAULTS = ('enabled', 'quality', 'grid_w', 'grid_h', 'min_cell_px', 'slice_ms', 'alpha',
+PANEL_DEFAULTS = ('enabled', 'quality') + QUALITY_KEYS + ('alpha',
                   'show_allies', 'smooth')
 TRANSPARENCY_STEP = 5     # percent
 
@@ -652,17 +675,18 @@ class Canvas(object):
                                          for y in xrange(self.h)])
 
 
-def render_panel(cfg, res, font):
+def render_panel(cfg, res, font, measured=None):
     """The settings panel as (png, w, h, hits); hits: [((x0, y0, x1, y1), action)] in panel
     pixels. font may be None: then only the boxes, signs and bars are drawn.
+    measured: (updates per second, ms per frame) of the last pass in this battle, if any.
 
-    Actions: ('toggle', key), ('quality', name), ('step', percent), ('slider', x0, x1) with the
-    track's ends, ('reset',), ('close',).
+    Actions: ('toggle', key), ('quality', name), ('number', key, step, lowest, highest),
+    ('step', percent), ('slider', x0, x1) with the track's ends, ('reset',), ('close',).
     """
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 6 + P_HINT_ROW + P_FOOTER
+    h = P_HEADER + 8 + ROW * 8 + P_HINT_ROW * 2 + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -677,6 +701,18 @@ def render_panel(cfg, res, font):
             c.rect(r[0] + 6, r[1] + 6, r[2] - 6, r[3] - 6, (235, 245, 235))
         c.text(font, PAD, mid(y, y + ROW), label, P_TEXT if key != 'enabled' or on else P_HINT)
         hits.append(((0, y, W, y + ROW), ('toggle', key)))
+
+    def number(y, key, label, value, step, lowest, highest):
+        # label ... [-] value [+]
+        c.text(font, PAD, mid(y, y + ROW), label, P_TEXT)
+        plus = (W - PAD - 24, y + 3, W - PAD, y + ROW - 3)
+        minus = (plus[0] - 6 - 56 - 6 - 24, y + 3, plus[0] - 6 - 56 - 6, y + ROW - 3)
+        for r, kind, delta in ((minus, '-', -step), (plus, '+', step)):
+            c.box(r, P_BUTTON, P_EDGE)
+            c.sign(r, kind, P_TEXT)
+            hits.append((r, ('number', key, delta, lowest, highest)))
+        text = u'%g' % value
+        c.text(font, minus[2] + 6 + (56 - width(text)) // 2, mid(y, y + ROW), text, P_VALUE)
 
     c.rect(0, 0, W, P_HEADER, P_HEADER_BG)
     c.text(font, PAD, mid(0, P_HEADER), u'Тепловая карта пробития', P_TEXT)
@@ -693,7 +729,7 @@ def render_panel(cfg, res, font):
     c.text(font, PAD, mid(y, y + ROW), u'Качество', P_TEXT)
     chosen = res[0].split(' ')[0]
     x1 = W - PAD
-    for level in (3, 2, 1, 0):
+    for level in reversed(xrange(len(QUALITY_ORDER))):
         name = QUALITY_ORDER[level]
         label = QUALITY_LABELS[name]
         cw = max(width(label) + 16, 48)
@@ -702,7 +738,7 @@ def render_panel(cfg, res, font):
         c.box(r, P_ON if on else P_BOX, P_EDGE)
         if font is None:
             for k in xrange(level + 1):     # more bars, finer map
-                c.rect(r[0] + 8 + k * 8, r[3] - 5 - 4 * (k + 1), r[0] + 13 + k * 8, r[3] - 5,
+                c.rect(r[0] + 5 + k * 8, r[3] - 5 - 3 * (k + 1), r[0] + 10 + k * 8, r[3] - 5,
                        P_TEXT if on else P_HINT)
         else:
             c.text(font, r[0] + (cw - width(label)) // 2, mid(r[1], r[3]), label,
@@ -710,9 +746,24 @@ def render_panel(cfg, res, font):
         hits.append(((r[0], y, r[2], y + ROW), ('quality', name)))
         x1 -= cw + 6
     y += ROW
-    hint = u'до %dx%d ячеек, ячейка от %g px, %g мс на кадр' % res[1:]
+    if chosen in QUALITY_HEAVY:
+        hint = u'до %dx%d ячеек: для мощных ПК, обновляется реже' % res[1:3]
+    else:
+        hint = u'до %dx%d ячеек, ячейка от %g px' % res[1:4]
     if res[0] != chosen:
-        hint += u' (числа из файла)'
+        hint += u' (свои числа)'
+    c.text(font, PAD, y + 2, hint, P_HINT)
+    y += P_HINT_ROW
+
+    # how often the map is recast, and what it may cost a frame
+    number(y, 'updates_per_sec', u'Обновлений в секунду', res[5], 1, 1, 30)
+    y += ROW
+    number(y, 'slice_ms', u'Не больше, мс на кадр', res[4], 0.5, 0.5, 20)
+    y += ROW
+    if measured is None:
+        hint = u'чаще, чем позволяют мс на кадр, карта не обновится'
+    else:
+        hint = u'сейчас: %.1f в секунду, %.1f мс на кадр' % measured
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
@@ -841,7 +892,7 @@ class Panel(object):
 
     def _draw(self):
         owner = self.owner
-        png, w, h, self.hits = render_panel(owner.cfg, owner.res, self.font())
+        png, w, h, self.hits = render_panel(owner.cfg, owner.res, self.font(), owner.measured)
         self.counter += 1
         name = 'hm_panel_%d_%d.png' % (os.getpid(), self.counter)
         with open(os.path.join(owner.cache_dir, name), 'wb') as f:
@@ -970,6 +1021,10 @@ class Panel(object):
             # a preset is chosen as a whole: numbers put into the file by hand step aside
             changes = dict.fromkeys(QUALITY_KEYS)
             changes['quality'] = action[1]
+        elif kind == 'number':
+            key, delta, lowest, highest = action[1:]
+            value = self.owner.res[QUALITY_KEYS.index(key) + 1] + delta
+            changes = {key: round(min(max(value, lowest), highest), 2)}
         elif kind == 'step':
             changes = {'alpha': alpha_of(transparency(cfg) + action[1])}
         elif kind == 'slider':
@@ -1028,7 +1083,8 @@ class Heatmap(object):
     def __init__(self):
         self.root = _game_root()
         self.cfg = _load_config(self.root)
-        self.res = resolution(self.cfg)   # (quality, grid_w, grid_h, min_cell_px, slice_ms)
+        # (quality, grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec)
+        self.res = resolution(self.cfg)
         self.res_mods = _res_mods_dir(self.root)
         self.cache_vfs = 'mods/%s_cache' % MOD_ID
         self.cache_dir = (os.path.join(self.res_mods, 'mods', MOD_ID + '_cache')
@@ -1053,6 +1109,13 @@ class Heatmap(object):
         self.errors = 0
         self.logged = set()
         self.passes = 0
+        self.pass_start = 0.0     # BigWorld.time() the pass in progress began at
+        self.progress = (0, 1, 0.0)   # of that pass: cells done, cells in all, seconds of work
+        self.cell_cost = None     # seconds of work per cell in the last pass over this target
+        self.frame_dt = None      # seconds between frames, smoothed
+        self.last_frame = None
+        self.measured = None      # (updates per second, ms of work per frame) of the last pass
+        self.report = False       # the panel is waiting for the first pass with new settings
         self.panel = Panel(self)
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
@@ -1203,6 +1266,7 @@ class Heatmap(object):
         self.job = None
         self.pic = None
         self.last_key = None
+        self.cell_cost = None
         self._hide()
 
     # ---- target ----
@@ -1288,7 +1352,7 @@ class Heatmap(object):
         w_px, h_px = (x1 - x0) * 0.5 * sw, (y1 - y0) * 0.5 * sh
         if w_px < 2.0 or h_px < 2.0:
             return
-        _, grid_w, grid_h, min_cell, _ = self.res
+        grid_w, grid_h, min_cell = self.res[1:4]
         cell = max(min_cell, w_px / grid_w, h_px / grid_h)
         gw = min(grid_w, max(1, int(math.ceil(w_px / cell - 1e-6))))
         gh = min(grid_h, max(1, int(math.ceil(h_px / cell - 1e-6))))
@@ -1306,6 +1370,7 @@ class Heatmap(object):
         cam_dist = math.sqrt((cx - view.pos[0]) ** 2 + (cy - view.pos[1]) ** 2
                              + (cz - view.pos[2]) ** 2)
         span = (max(view.near, cam_dist - radius - 0.5), cam_dist + radius + 0.5)
+        self.progress = (0, gw * gh, 0.0)
         self.job = self._pass(target, view, (gw, gh, left, top, cw, ch), span, box, rules,
                               full_pp, gun, key, he_result)
 
@@ -1399,6 +1464,7 @@ class Heatmap(object):
                     codes[row + i] = code
                 if not (row + i) & 7 and clock() > self.deadline:
                     work += clock() - slice_start
+                    self.progress = (row + i + 1, gw * gh, work)
                     yield
                     slice_start = clock()
                     frames += 1
@@ -1412,13 +1478,34 @@ class Heatmap(object):
         self._publish(target, codes, gw, gh, (left, top, gw * cw, gh * ch), box)
         self.last_key = key
         self.passes += 1
+        work += clock() - slice_start
+        self.cell_cost = work / (gw * gh)
+        # passes follow each other no faster than asked for, and no faster than they take
+        took = max(BigWorld.time() - self.pass_start, 1.0 / self.res[5], 1e-3)
+        self.measured = (1.0 / took, work * 1000.0 / frames)
+        if self.report:
+            self.report = False
+            self.panel.redraw()
         if self.cfg['debug'] or self.passes == 1:
-            work += clock() - slice_start
             log('pass %d: %s grid %dx%d, %d cells on armor, %s pen %.0f mm, %.1f ms of work in '
-                '%d frames' % (self.passes, target.typeDescriptor.type.name, gw, gh, hit_cells,
-                               shell.kind, full_pp, work * 1000.0, frames))
+                '%d frames: %.1f updates a second at %.1f ms per frame'
+                % ((self.passes, target.typeDescriptor.type.name, gw, gh, hit_cells, shell.kind,
+                    full_pp, work * 1000.0, frames) + self.measured))
             if self.passes == 1:
                 log(self._resolution_text())
+
+    def _slice(self, now):
+        """Seconds of ray casting for this frame: what finishes the pass in time for the wanted
+        updates per second, but no more than slice_ms."""
+        most = self.res[4] / 1000.0
+        done, total, work = self.progress
+        cost = self.cell_cost
+        if cost is None and done >= 64:
+            cost = work / done
+        if cost is None or not self.frame_dt:
+            return most
+        frames = max(1.0, (self.pass_start + 1.0 / self.res[5] - now) / self.frame_dt)
+        return min(most, max(MIN_SLICE, (total - done) * cost * 1.15 / frames))
 
     # ---- frames ----
 
@@ -1430,6 +1517,10 @@ class Heatmap(object):
             self._drop()
             return OFF_PERIOD
         now = BigWorld.time()
+        if self.last_frame is not None and 0.0 < now - self.last_frame < 0.25:
+            dt = now - self.last_frame
+            self.frame_dt = dt if self.frame_dt is None else self.frame_dt * 0.8 + dt * 0.2
+        self.last_frame = now
         target = self._pick_target(player, now)
         if target is None:
             return IDLE_PERIOD
@@ -1448,10 +1539,11 @@ class Heatmap(object):
         else:
             self._hide()
         if self.job is None and now >= self.next_pass:
-            self.next_pass = now + float(cfg['refresh_period'])
+            self.next_pass = now + 1.0 / self.res[5]
+            self.pass_start = now
             self._start_pass(player, target, view, corners, box)
         if self.job is not None:
-            self.deadline = time.clock() + self.res[4] / 1000.0
+            self.deadline = time.clock() + self._slice(now)
             try:
                 next(self.job)
             except StopIteration:
@@ -1472,6 +1564,8 @@ class Heatmap(object):
         try:
             delay = self._frame()
             self.errors = 0
+            if delay:
+                self.last_frame = None    # not called every frame: no frame time to measure
         except Exception:
             self.errors += 1
             if self.errors <= 3:
@@ -1505,6 +1599,7 @@ class Heatmap(object):
         # what is on screen was drawn with the old settings
         self.last_key = self.pic_sig = None
         self.next_pass = 0.0
+        self.report = True
         if not cfg['enabled']:
             self._drop()
         elif self.in_battle and self.tick_cb is None:
@@ -1547,11 +1642,13 @@ class Heatmap(object):
 
     def _resolution_text(self):
         """The resolution in use and where to change it, for python.log."""
-        name, grid_w, grid_h, min_cell, slice_ms = self.res
-        return ('quality "%s": up to %dx%d cells, a cell at least %g px, %g ms of work per frame. '
-                'For a finer or coarser map set "quality" to %s in %s (read at the start of a '
-                'battle); grid_w, grid_h, min_cell_px and slice_ms there replace single values'
-                % (name, grid_w, grid_h, min_cell, slice_ms, ' / '.join(QUALITY_ORDER),
+        name, grid_w, grid_h, min_cell, slice_ms, rate = self.res
+        return ('quality "%s": up to %dx%d cells, a cell at least %g px, %g updates a second '
+                'wanted, at most %g ms of work per frame. For a finer or coarser map set '
+                '"quality" to %s in %s (read at the start of a battle; max is for fast computers, '
+                'its map refreshes more slowly) or press Ctrl+Shift+G; grid_w, grid_h (up to 512), '
+                'min_cell_px, slice_ms and updates_per_sec there replace single values'
+                % (name, grid_w, grid_h, min_cell, rate, slice_ms, ' / '.join(QUALITY_ORDER),
                    os.path.join(self.root, CONFIG_PATH)))
 
     def on_battle_end(self):
@@ -1567,6 +1664,8 @@ class Heatmap(object):
         self.job = None
         self.pic = self.pic_sig = self.last_key = self.cur_box = None
         self.errors, self.passes = 0, 0
+        self.cell_cost = self.frame_dt = self.last_frame = self.measured = None
+        self.report = False
         self.logged.clear()
         if self.comp is not None:
             try:

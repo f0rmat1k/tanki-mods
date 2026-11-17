@@ -486,7 +486,7 @@ check(os.path.isfile(os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.j
       'default config written')
 import json  # noqa: E402
 saved = json.load(open(CONFIG))
-check(g.res == ('high', 80, 60, 2.0, 3.5), '0.1.0 settings file moves to quality high %r' % (g.res,))
+check(g.res == ('high', 80, 60, 2.0, 3.5, 10.0), '0.1.0 settings file moves to quality high %r' % (g.res,))
 check(saved['quality'] == 'high' and saved['grid_w'] is None and saved['slice_ms'] is None
       and '_help' in saved and saved['alpha'] == 0.5, 'settings file rewritten with quality')
 orig_publish = g._publish
@@ -552,7 +552,7 @@ check(len(PUBLISHED) == 3, 'new pass after the camera moved')
 still = PUBLISHED[-1]
 
 # the target drives during a pass cut into many frames: the grid must not shear
-g.res = g.res[:4] + (0.05,)
+g.res = g.res[:4] + (0.05,) + g.res[5:]
 g.last_key = None
 
 
@@ -569,7 +569,7 @@ same = sum(1 for a, b in zip(moved[0][0], still[0]) if a == b)
 share = same / float(len(still[0]))
 print('     first moving pass: %.1f%% of the cells as in the still one' % (share * 100))
 check(moved[0][1:3] == still[1:3] and share > 0.97, 'moving target gives the still picture')
-g.res = g.res[:4] + (3.5,)
+g.res = g.res[:4] + (3.5,) + g.res[5:]
 enemy.matrix.translation = (1.0, 0.0, 22.0)
 
 # HEAT and HE
@@ -673,21 +673,33 @@ def battle_with(**settings):
 
 
 grids = {}
-for q in ('low', 'medium', 'high', 'ultra'):
+for q in ('low', 'medium', 'high', 'ultra', 'max'):
     grids[q] = battle_with(quality=q)
     print('     quality %-6s -> res %r, grid %r' % (q, g.res, grids[q]))
     check(g.res[0] == q and g.res[1:] == tuple(float(v) if i > 1 else v
                                                  for i, v in enumerate(hm.QUALITY[q])),
           'quality %s read from the file' % q)
 check(grids['low'][0] == 32 and grids['medium'][0] == 48 and grids['high'][0] == 80
-      and grids['ultra'][0] == 128, 'each quality gives a finer grid')
-check(battle_with(quality='ULTRA', grid_w=100, min_cell_px=3) is not None
-      and g.res == ('ultra + own numbers', 100, 96, 3.0, 5.0), 'numbers replace preset values')
+      and grids['ultra'][0] == 128 and grids['max'][0] == 192, 'each quality gives a finer grid')
+check(battle_with(quality='max', grid_w=256, grid_h=256) is not None
+      and g.res == ('max + own numbers', 256, 256, 1.0, 8.0, 12.0) and PUBLISHED[-1][1] > 192,
+      'a 256x256 grid can be set by hand')
+check(battle_with(quality='ULTRA', grid_w=100, grid_h=None, min_cell_px=3) is not None
+      and g.res == ('ultra + own numbers', 100, 96, 3.0, 5.0, 10.0), 'numbers replace preset values')
 check(battle_with(quality='best', grid_w=None, min_cell_px=None) is not None
-      and g.res == ('high', 80, 60, 2.0, 3.5), 'unknown quality falls back to high')
+      and g.res == ('high', 80, 60, 2.0, 3.5, 10.0), 'unknown quality falls back to high')
 check(battle_with(quality='high', grid_w=100000, slice_ms='fast') is not None
-      and g.res == ('high + own numbers', 256, 60, 2.0, 3.5), 'bad numbers are clamped or dropped')
-battle_with(grid_w=None, slice_ms=None)
+      and g.res == ('high + own numbers', 512, 60, 2.0, 3.5, 10.0), 'bad numbers are clamped or dropped')
+# updates per second: the work is spread over the time a pass may take, not done at once
+check(battle_with(quality='low', grid_w=None, slice_ms=50, updates_per_sec=2) is not None
+      and g.res == ('low + own numbers', 32, 24, 6.0, 50.0, 2.0), 'updates per second from the file')
+print('     measured: %.2f updates a second, %.1f ms a frame' % g.measured)
+check(abs(g.measured[0] - 2.0) < 0.3 and g.measured[1] < 15.0,
+      'a pass is spread over half a second instead of taking 50 ms of each frame')
+check(battle_with(updates_per_sec=30) is not None and g.measured[0] > 3.0 * 2
+      and g.measured[1] > 15.0, 'more updates a second: more work per frame (%.1f/s, %.1f ms)'
+      % g.measured)
+battle_with(quality='high', grid_w=None, slice_ms=None, updates_per_sec=None)
 
 # ---- the settings panel ----
 PANEL_KEY = KeyEvent(34, ctrl=True, shift=True)
@@ -744,11 +756,31 @@ frames(2)
 CURSOR.position = (0.9, CURSOR.position[1])
 frames(3)
 check(g.cfg['alpha'] == 0.7 and g.panel.slider is None, 'drag ends when the button is released')
-check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 5.0)
+check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 5.0, 10.0)
       and saved()['quality'] == 'ultra', 'quality chip')
 del PUBLISHED[:]
 frames(1500)
 check(PUBLISHED and PUBLISHED[-1][1] == 128, 'the map is recast at the new quality at once')
+check(click(('quality', 'max')) is True and g.res == ('max', 192, 144, 1.0, 8.0, 12.0), 'max chip')
+panel_png('panel_max.png')
+check(click(('quality', 'ultra')) is True, 'back to ultra')
+
+
+def number(key, sign):
+    return [a for r, a in g.panel.hits if a[0] == 'number' and a[1] == key and a[2] * sign > 0][0]
+
+
+check(click(number('updates_per_sec', 1)) is True and g.res[5] == 11.0
+      and saved()['updates_per_sec'] == 11.0, 'updates per second + in the panel')
+check(click(number('updates_per_sec', -1)) and click(number('updates_per_sec', -1))
+      and g.res[5] == 9.0, 'updates per second -')
+check(click(number('slice_ms', 1)) is True and g.res[4] == 5.5 and saved()['slice_ms'] == 5.5,
+      'ms per frame + in the panel')
+frames(1500)
+check(g.measured is not None and not g.report, 'the panel shows the measured rate after a pass')
+panel_png('panel_rate.png')
+check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 5.0, 10.0)
+      and saved()['updates_per_sec'] is None, 'a quality chip puts its own numbers back')
 check(click(('toggle', 'show_allies')) is True and g.cfg['show_allies'] is True, 'allies toggle')
 n_roots = len(ROOTS)
 check(click(('toggle', 'smooth')) is True and g.cfg['smooth'] is True, 'smooth toggle')
@@ -760,7 +792,7 @@ check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp
       'off from the panel hides the map')
 panel_png('panel_off.png')
 check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
-      and g.res == ('high', 80, 60, 2.0, 3.5) and not g.cfg['smooth'] and not g.cfg['show_allies'],
+      and g.res == ('high', 80, 60, 2.0, 3.5, 10.0) and not g.cfg['smooth'] and not g.cfg['show_allies'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
 CURSOR.position = (-0.9, 0.9)
@@ -809,6 +841,13 @@ check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel without
 check(click(('quality', 'high')) is True and g.res[0] == 'high', 'and it works')
 panel_png('panel_nofont.png')
 game.handleKeyEvent(KeyEvent(1))
+# settings files written before 0.3.1 gave the pause between passes in seconds
+for period, want in ((0.25, 4), (0.12, None)):
+    with open(CONFIG, 'w') as f:
+        json.dump({'quality': 'high', 'refresh_period': period}, f)
+    cfg = hm._load_config(ROOT)
+    check(cfg['updates_per_sec'] == want and 'refresh_period' not in cfg
+          and 'refresh_period' not in saved(), 'refresh_period %s -> updates_per_sec %s' % (period, want))
 hm.fini()
 check(not ROOTS and not STATE.callbacks, 'fini cleans up')
 shutil.rmtree(TEMP, ignore_errors=True)
