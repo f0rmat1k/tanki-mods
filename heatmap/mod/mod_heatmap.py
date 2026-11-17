@@ -33,7 +33,7 @@ mounts res_mods with cacheSubdirs, so the folder must exist before the game star
 (build_mod.py --install creates it; the mod creates it too, then one restart is needed).
 
 Ctrl+Shift+H in battle turns the heatmap on and off. Ctrl+Shift+G, in the hangar or in battle,
-opens the settings panel: on / off, quality, transparency, allies, smoothing. Like the heatmap it
+opens the settings panel: on / off, quality, refresh, transparency, cover, allies. Like the heatmap it
 is a PNG the mod draws itself and shows with GUI.Simple; mouse clicks are hit-tested against it.
 In battle the game shows the cursor while Ctrl is held, and the map stays on the last target
 while the panel is open, so a change is seen at once. The captions use the bitmap font packed with
@@ -72,7 +72,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.4.0'
+__version__ = '0.4.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -92,7 +92,6 @@ DEFAULTS = {
     'hold': 1.0,              # seconds the map stays after the crosshair left the target
     'alpha': 0.5,
     'margin': 0.10,           # yellow band: the armor is within this share of the penetration
-    'smooth': False,          # blend the cells instead of drawing them as squares
     'show_allies': False,
     'hide_covered': True,     # leave out the parts of the target behind terrain and buildings
     'covered_alpha': 0.0,     # ... or draw them with this share of `alpha` (0: not at all)
@@ -210,12 +209,14 @@ def _load_config(root):
             with open(path) as f:
                 user = json.load(f)
             # settings added since the file was written go into it, so they can be found there
-            rewrite = bool(set(DEFAULTS) - set(user))
+            # ... and settings that are gone leave it
+            rewrite = bool(set(DEFAULTS) - set(user)) or 'smooth' in user or 'refresh_period' in user
             if 'quality' not in user:
                 for key, value in LEGACY_RESOLUTION.items():
                     if user.get(key) == value:
                         del user[key]
             # before 0.3.1 the pause between passes was set in seconds: keep a chosen one
+            user.pop('smooth', None)    # an option of 0.1-0.4.0 that is gone
             period = user.pop('refresh_period', None)
             if 'updates_per_sec' not in user and period not in (None, 0.12):
                 try:
@@ -576,7 +577,7 @@ LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_p
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
 PANEL_DEFAULTS = ('enabled', 'quality') + QUALITY_KEYS + ('alpha', 'hide_covered',
-                  'show_allies', 'smooth')
+                  'show_allies')
 TRANSPARENCY_STEP = 5     # percent
 
 
@@ -695,7 +696,7 @@ def render_panel(cfg, res, font, measured=None):
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 9 + P_HINT_ROW * 2 + P_FOOTER
+    h = P_HEADER + 8 + ROW * 8 + P_HINT_ROW * 2 + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -809,8 +810,6 @@ def render_panel(cfg, res, font, measured=None):
     toggle(y, 'hide_covered', u'Скрывать за укрытиями')
     y += ROW
     toggle(y, 'show_allies', u'Показывать и на союзниках')
-    y += ROW
-    toggle(y, 'smooth', u'Сглаживать ячейки')
     y += ROW
 
     y += 8
@@ -1200,28 +1199,9 @@ class Heatmap(object):
         return pal
 
     def _rows(self, codes, gw, gh):
-        """The grid as PNG rows. Smooth mode gives the empty cells next to a colored one its
-        color with zero alpha, or blending would draw a dark rim around the vehicle."""
+        """The grid as PNG rows, a pixel per cell."""
         pal = self.palette
-        if not self.cfg['smooth']:
-            return [b''.join([pal[c] for c in codes[j * gw:(j + 1) * gw]]) for j in xrange(gh)]
-        rows = []
-        for j in xrange(gh):
-            row = []
-            for i in xrange(gw):
-                c = codes[j * gw + i]
-                if c:
-                    row.append(pal[c])
-                    continue
-                near = 0
-                for dj, di in ((0, -1), (0, 1), (-1, 0), (1, 0)):
-                    y, x = j + dj, i + di
-                    if 0 <= y < gh and 0 <= x < gw and codes[y * gw + x]:
-                        near = codes[y * gw + x]
-                        break
-                row.append(pal[near][:3] + b'\x00' if near else pal[0])
-            rows.append(b''.join(row))
-        return rows
+        return [b''.join([pal[c] for c in codes[j * gw:(j + 1) * gw]]) for j in xrange(gh)]
 
     def _component(self, tex):
         c = self.comp
@@ -1236,10 +1216,10 @@ class Heatmap(object):
         c.horizontalAnchor = S.eHAnchor.LEFT
         c.verticalAnchor = S.eVAnchor.TOP
         try:
-            filters = S.eFilterType
-            c.filterType = filters.LINEAR if self.cfg['smooth'] else filters.POINT
+            # a pixel of the picture is a cell: draw it as a square, not blended with the next
+            c.filterType = S.eFilterType.POINT
         except Exception:
-            log('no texture filter choice: the cells are blended')
+            log('no point texture filter: the cells are blended')
         c.visible = False
         GUI.addRoot(c)
         return c
@@ -1630,13 +1610,6 @@ class Heatmap(object):
         _save_config(self.root, cfg)
         self.res = resolution(cfg)
         self.palette = self._make_palette()
-        if 'smooth' in changes and self.comp is not None:
-            # the texture filter is chosen when the picture's component is made
-            try:
-                GUI.delRoot(self.comp)
-            except Exception:
-                pass
-            self.comp = None
         # what is on screen was drawn with the old settings
         self.last_key = self.pic_sig = None
         self.next_pass = 0.0

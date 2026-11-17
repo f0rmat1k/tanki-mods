@@ -843,17 +843,15 @@ check(g.cover_failed and PUBLISHED[-1][0] == open_codes and g.tick_cb is not Non
 WALL['broken'], WALL['x'] = False, None
 g.cover_failed = False
 panel_png('panel_cover.png')
-n_roots = len(ROOTS)
-check(click(('toggle', 'smooth')) is True and g.cfg['smooth'] is True, 'smooth toggle')
-frames(1500)
+frames(600)
 maps = [r for r in ROOTS if r is not g.panel.comp]
-check(len(maps) == 1 and maps[0].filterType == 'LINEAR', 'smooth map uses the linear filter')
-comp = maps[0]
+check(len(maps) == 1 and maps[0] is comp and comp.filterType == 'POINT'
+      and not [a for r, a in g.panel.hits if a == ('toggle', 'smooth')], 'no smoothing option')
 check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp.visible,
       'off from the panel hides the map')
 panel_png('panel_off.png')
 check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
-      and g.res == ('high', 80, 60, 2.0, 3.5, 10.0) and not g.cfg['smooth'] and not g.cfg['show_allies'],
+      and g.res == ('high', 80, 60, 2.0, 3.5, 10.0) and g.cfg['hide_covered'] and not g.cfg['show_allies'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
 CURSOR.position = (-0.9, 0.9)
@@ -905,8 +903,9 @@ game.handleKeyEvent(KeyEvent(1))
 # settings files written before 0.3.1 gave the pause between passes in seconds
 for period, want in ((0.25, 4), (0.12, None)):
     with open(CONFIG, 'w') as f:
-        json.dump({'quality': 'high', 'refresh_period': period}, f)
+        json.dump({'quality': 'high', 'refresh_period': period, 'smooth': True}, f)
     cfg = hm._load_config(ROOT)
+    check('smooth' not in cfg and 'smooth' not in saved(), 'the smooth option of old files is dropped')
     check(cfg['updates_per_sec'] == want and 'refresh_period' not in cfg
           and 'refresh_period' not in saved(), 'refresh_period %s -> updates_per_sec %s' % (period, want))
 hm.fini()
