@@ -14,17 +14,23 @@ at the distance to the target. The grid becomes a small RGBA picture stretched o
     dark red   ricochet
     grey       pierced, but nothing that takes damage behind it (gun, tracks, a bare screen)
 
-Refresh: the map is not redrawn every frame. A pass over the grid is cut into slices, one per
-frame, and the picture changes when a pass ends; between passes it follows the target's box on
-the screen every frame. `updates_per_sec` is how often a pass is wanted: the mod spends as
-little time per frame as that takes, and never more than `slice_ms`. A fine grid on a close
-target needs more than that allows, and is then refreshed as fast as `slice_ms` permits.
-A pass is skipped while nothing moved.
+Refresh: the map is not redrawn every frame. A pass over the grid is cut into slices of at most
+`slice_ms`, one per frame, and the picture changes when a pass ends; between passes it follows
+the target's box on the screen every frame. There are two kinds of pass:
+
+    fast   while the target, the player or the gun moves: the grid is made as coarse as it takes
+           to finish `updates_per_sec` passes a second, from the measured cost of a cell
+    fine   once nothing moves: the full grid of the chosen quality, however long it takes;
+           it is dropped the moment something moves again
+
+"Moves" is judged on the target, not on the screen (see scene_moved): turning the camera with
+the mouse only slides the picture and keeps the fine map. The cost of a cell is measured in
+every pass and kept between battles in the settings file.
 
 Resolution: "quality" in the settings file picks a preset (low, medium, high, ultra, max: see
-QUALITY; max is meant for fast computers, its map is the finest and the slowest to refresh):
-the most cells across and down the target, the smallest cell on the screen, the most
-milliseconds of work per frame and the updates per second. A number in grid_w, grid_h,
+QUALITY): the most cells across and down the target (the fine map), the smallest cell on the
+screen, the most milliseconds of work per frame and the updates per second of the fast map.
+A number in grid_w, grid_h,
 min_cell_px, slice_ms or updates_per_sec replaces the preset's value; null takes it from the
 preset. The file is read again at the start of every battle.
 
@@ -72,23 +78,24 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.4.1'
+__version__ = '0.5.0'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
 DEFAULTS = {
-    '_help': ('quality: low, medium, high, ultra or max (max is for fast computers: the finest '
-              'map, refreshed more slowly). grid_w, grid_h (up to 512), min_cell_px, slice_ms '
-              '(most milliseconds of work per frame), updates_per_sec (map refreshes wanted per '
-              'second, 1-30): a number replaces the value of the chosen quality, null takes it '
-              'from the quality'),
+    '_help': ('quality: low, medium, high, ultra or max: the finest map, drawn when nothing '
+              'moves. grid_w, grid_h (up to 512), min_cell_px, slice_ms (most milliseconds of '
+              'work per frame), updates_per_sec (map refreshes per second while something moves, '
+              '1-30: the map gets as coarse as that takes): a number replaces the value of the '
+              'chosen quality, null takes it from the quality'),
+    '_cell_cost_us': None,    # microseconds a cell costs on this computer: measured, not set
     'enabled': True,
     'quality': 'high',        # the resolution preset: a key of QUALITY
     'grid_w': None,           # most cells across the target ...
     'grid_h': None,           # ... and down; cells are square, a far target gets fewer
     'min_cell_px': None,      # a cell is never smaller than this on the screen
     'slice_ms': None,         # most milliseconds of ray casting per frame
-    'updates_per_sec': None,  # passes wanted per second
+    'updates_per_sec': None,  # fast passes per second while something moves
     'hold': 1.0,              # seconds the map stays after the crosshair left the target
     'alpha': 0.5,
     'margin': 0.10,           # yellow band: the armor is within this share of the penetration
@@ -106,25 +113,39 @@ DEFAULTS = {
     'debug': False,
 }
 
-# quality -> (grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec). In the game a cell costs some 15
-# microseconds, so a full grid of "high" is about 70 ms of work spread over 20 frames, a full
-# grid of "ultra" about 180 ms over 36, a full grid of "max" about 400 ms over 50: a refresh
-# every half a second or so, and 8 ms taken from every frame meanwhile. The grid is only full
-# on a target that is large on the screen: cells never get smaller than min_cell_px
+# quality -> (grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec). The grid is the fine map's
+# and is only full on a target that is large on the screen: cells never get smaller than
+# min_cell_px. In the game a cell costs some 15 microseconds, so the full grid of "max" is about
+# 400 ms of work, and the 8 ms a frame of "max" buy some 3000 cells in each of 15 fast passes
+# a second on a computer that runs the game at 240 frames a second
 QUALITY = {
-    'low': (32, 24, 6, 2.0, 5),
-    'medium': (48, 32, 4, 2.5, 8),
-    'high': (80, 60, 2, 3.5, 10),
-    'ultra': (128, 96, 1, 5.0, 10),
-    'max': (192, 144, 1, 8.0, 12),
+    'low': (32, 24, 6, 2.0, 8),
+    'medium': (48, 32, 4, 3.0, 10),
+    'high': (80, 60, 2, 4.0, 12),
+    'ultra': (128, 96, 1, 6.0, 15),
+    'max': (192, 144, 1, 8.0, 15),
 }
 QUALITY_ORDER = ('low', 'medium', 'high', 'ultra', 'max')
-# presets that cost frames: the panel and the log say so
-QUALITY_HEAVY = ('max',)
 QUALITY_KEYS = ('grid_w', 'grid_h', 'min_cell_px', 'slice_ms', 'updates_per_sec')
 # (lowest, highest) a setting may be, whatever the file says
 QUALITY_LIMITS = ((4, 512), (4, 512), (1.0, 64.0), (0.05, 50.0), (1.0, 30.0))
-MIN_SLICE = 0.0002        # seconds: a frame of a pass does at least this much
+
+# fast passes: the grid is sized to what the time between two updates pays for
+DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the game
+FAST_FILL = 0.85              # share of that time a fast pass is planned to take
+MIN_FAST_CELLS = 200          # a fast grid is never coarser than this many cells
+DEFAULT_BASE_FRAME = 0.005    # seconds a frame takes without the mod, until it is measured
+# "nothing moved" between two scenes (see scene_moved)
+STILL_VIEW_COS = math.cos(math.radians(0.5))   # the side the camera sees the target from
+STILL_GUN_COS = math.cos(math.radians(0.4))    # the side the gun shoots at it from
+STILL_DISTANCE = 0.03         # share of the distance from the target to the camera or the gun
+STILL_PART = 0.15             # meters a corner of a part's box moved on the target (turret, gun)
+STILL_ZOOM = 0.01             # share the zoom changed by
+# a still scene gets a new fine pass when its place on the screen changed this much
+REFRESH_SIZE = 0.05           # share of the box's width or height
+REFRESH_SHIFT = 0.15          # clip units (the screen is 2 wide) the box moved
+REFRESH_SHIFT_CUT = 0.02      # ... if the screen edge cut the box: it was cast only where seen
+STILL_CHECK_PERIOD = 0.05     # seconds between looks whether a finished fine map still holds
 # 0.1.0 wrote its fixed resolution into the file: those values are not the user's choice
 LEGACY_RESOLUTION = {'grid_w': 48, 'grid_h': 32, 'min_cell_px': 4, 'slice_ms': 2.5}
 
@@ -272,6 +293,20 @@ def _save_config(root, cfg):
             json.dump(cfg, f, indent=2, sort_keys=True)
     except Exception:
         log('config save failed', traceback.format_exc())
+
+
+def _store_value(root, key, value):
+    """Put one value into the settings file as it is on disk now: the user may have edited the
+    file since it was read, and that must not be undone."""
+    path = os.path.join(root, CONFIG_PATH)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        data[key] = value
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+    except Exception:
+        log('settings file not updated', traceback.format_exc())
 
 
 def _rgb(text, default):
@@ -541,13 +576,43 @@ def target_corners(target):
     return out
 
 
+def scene_moved(a, b):
+    """True if scene b is not scene a seen again (scenes: Heatmap._scene). The camera and the
+    gun are compared as directions and distances from the target, in its own frame, so turning
+    the camera with the mouse is not a move, and a step of the player counts by the angle it
+    makes at the target."""
+    if a[0] != b[0] or len(a[3]) != len(b[3]) or abs(a[4] - b[4]) > STILL_ZOOM * a[4]:
+        return True
+    for p, q, limit in ((a[1], b[1], STILL_VIEW_COS), (a[2], b[2], STILL_GUN_COS)):
+        lp = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2])
+        lq = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2])
+        if lp < 0.01 or lq < 0.01 or abs(lp - lq) > STILL_DISTANCE * lp:
+            return True
+        if (p[0] * q[0] + p[1] * q[1] + p[2] * q[2]) / (lp * lq) < limit:
+            return True
+    for p, q in zip(a[3], b[3]):
+        if abs(p[0] - q[0]) + abs(p[1] - q[1]) + abs(p[2] - q[2]) > STILL_PART:
+            return True
+    return False
+
+
+def box_drifted(a, b):
+    """True if the target's box b on the screen is far enough from box a, the one a fine pass
+    was cast for, to cast it again: it grew or shrank, or slid a good way across the screen."""
+    aw, ah = a[2] - a[0], a[3] - a[1]
+    if aw <= 0.0 or ah <= 0.0:
+        return True
+    if abs(b[2] - b[0] - aw) > REFRESH_SIZE * aw or abs(b[3] - b[1] - ah) > REFRESH_SIZE * ah:
+        return True
+    shift = max(abs(b[0] + b[2] - a[0] - a[2]), abs(b[1] + b[3] - a[1] - a[3])) * 0.5
+    cut = min(a[0], a[1]) < -1.0 or max(a[2], a[3]) > 1.0
+    return shift > (REFRESH_SHIFT_CUT if cut else REFRESH_SHIFT)
+
+
 def _pose(matrix):
     p = matrix.translation
     return p.x, p.y, p.z, matrix.yaw, matrix.pitch, matrix.roll
 
-
-def _quant(values, k):
-    return tuple([int(round(v * k)) for v in values])
 
 
 # ---- settings panel ----
@@ -688,7 +753,8 @@ class Canvas(object):
 def render_panel(cfg, res, font, measured=None):
     """The settings panel as (png, w, h, hits); hits: [((x0, y0, x1, y1), action)] in panel
     pixels. font may be None: then only the boxes, signs and bars are drawn.
-    measured: (updates per second, ms per frame) of the last pass in this battle, if any.
+    measured: {'fast': (grid w, h, passes a second), 'fine': (grid w, h, seconds it took)} of
+    the last passes of this battle, as far as there were any.
 
     Actions: ('toggle', key), ('quality', name), ('number', key, step, lowest, highest),
     ('step', percent), ('slider', x0, x1) with the track's ends, ('reset',), ('close',).
@@ -756,24 +822,23 @@ def render_panel(cfg, res, font, measured=None):
         hits.append(((r[0], y, r[2], y + ROW), ('quality', name)))
         x1 -= cw + 6
     y += ROW
-    if chosen in QUALITY_HEAVY:
-        hint = u'до %dx%d ячеек: для мощных ПК, обновляется реже' % res[1:3]
-    else:
-        hint = u'до %dx%d ячеек, ячейка от %g px' % res[1:4]
+    hint = u'до %dx%d ячеек, когда ничего не движется' % res[1:3]
     if res[0] != chosen:
         hint += u' (свои числа)'
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
     # how often the map is recast, and what it may cost a frame
-    number(y, 'updates_per_sec', u'Обновлений в секунду', res[5], 1, 1, 30)
+    number(y, 'updates_per_sec', u'Обновлений в секунду в движении', res[5], 1, 1, 30)
     y += ROW
     number(y, 'slice_ms', u'Не больше, мс на кадр', res[4], 0.5, 0.5, 20)
     y += ROW
-    if measured is None:
-        hint = u'чаще, чем позволяют мс на кадр, карта не обновится'
-    else:
-        hint = u'сейчас: %.1f в секунду, %.1f мс на кадр' % measured
+    parts = []
+    if measured and 'fast' in measured:
+        parts.append(u'в движении %dx%d, %.0f раз/с' % measured['fast'])
+    if measured and 'fine' in measured:
+        parts.append(u'стоя %dx%d за %.2f с' % measured['fine'])
+    hint = u'; '.join(parts) or u'в движении сетка грубее, чтобы успевать обновляться'
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
@@ -1110,7 +1175,9 @@ class Heatmap(object):
         self.job = None           # generator of the pass in progress
         self.deadline = 0.0       # time.clock() at which the pass yields the frame
         self.next_pass = 0.0
-        self.last_key = None      # what the finished pass was computed for
+        self.last_key = None      # (scene, full grid?) of the last finished pass
+        self.job_scene = None     # the scene the pass in progress was begun for
+        self.job_fine = False     # ... and whether it is a fine pass
         self.pic = None           # (target id, (left, top, w, h) in clip coords, target box then)
         self.pic_sig = None       # (w, h, rows) of the picture in the texture
         self.cur_box = None
@@ -1121,12 +1188,13 @@ class Heatmap(object):
         self.cover_failed = False     # the scene ray raised: no cover test for this battle
         self.passes = 0
         self.pass_start = 0.0     # BigWorld.time() the pass in progress began at
-        self.progress = (0, 1, 0.0)   # of that pass: cells done, cells in all, seconds of work
-        self.cell_cost = None     # seconds of work per cell in the last pass over this target
-        self.frame_dt = None      # seconds between frames, smoothed
+        self.cost = self._stored_cost()   # seconds of work per cell, smoothed over the passes
+        self.cost_dirty = False   # ... measured in this battle, to be stored after it
+        self.base_dt = None       # seconds a frame takes without the mod's work, smoothed
+        self.mod_time = 0.0       # seconds the mod took in the last frame
         self.last_frame = None
-        self.measured = None      # (updates per second, ms of work per frame) of the last pass
-        self.report = False       # the panel is waiting for the first pass with new settings
+        self.measured = {}        # see render_panel
+        self.report = 0           # passes the open panel still wants to show the numbers of
         self.panel = Panel(self)
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
@@ -1265,7 +1333,6 @@ class Heatmap(object):
         self.job = None
         self.pic = None
         self.last_key = None
-        self.cell_cost = None
         self._hide()
 
     # ---- target ----
@@ -1313,9 +1380,58 @@ class Heatmap(object):
 
     # ---- the pass ----
 
-    def _start_pass(self, player, target, view, corners, box):
-        """Begin a pass over the grid, unless the last one was made for the very same scene."""
-        cfg = self.cfg
+    def _stored_cost(self):
+        """Seconds a cell costs, as measured in earlier battles (the settings file keeps it)."""
+        try:
+            micro = float(self.cfg.get('_cell_cost_us'))
+            if 1.0 <= micro <= 1000.0:
+                return micro * 1e-6
+        except (TypeError, ValueError):
+            pass
+        return DEFAULT_CELL_COST
+
+    @staticmethod
+    def _gun(player, own):
+        """Where the player's shells start."""
+        try:
+            g = player.gunRotator.getCurShotPosition()[0]
+            return g.x, g.y, g.z
+        except Exception:
+            return own.x, own.y + 2.0, own.z
+
+    def _scene(self, player, target, view, corners, box):
+        """What a pass depends on: (shell and its penetration; the camera, the gun and the
+        corners of the target's parts in the target's own frame; the zoom; the box on screen).
+        Two scenes are compared by scene_moved and box_drifted."""
+        shot = player.getVehicleDescriptor().shot
+        shell = shot.shell
+        inv = Math.Matrix(target.matrix)
+        origin = inv.translation
+        inv.invert()
+        own = player.getOwnVehiclePosition()
+        pen = pen_at(shot, math.sqrt((origin.x - own.x) ** 2 + (origin.y - own.y) ** 2
+                                     + (origin.z - own.z) ** 2))
+        V3 = Math.Vector3
+        cam = inv.applyPoint(V3(*view.pos))
+        gun = inv.applyPoint(V3(*self._gun(player, own)))
+        parts = []
+        for c in corners:
+            p = inv.applyPoint(V3(c[0], c[1], c[2]))
+            parts.append((p.x, p.y, p.z))
+        return ((getattr(shell, 'compactDescr', shell.kind), int(round(pen))),
+                (cam.x, cam.y, cam.z), (gun.x, gun.y, gun.z), parts, view.tan_y, box)
+
+    def _fast_cells(self):
+        """How many cells a fast pass may have to be done in time for the next one: the work
+        the frames between two updates have room for, by the cost of a cell."""
+        most = self.res[4] / 1000.0
+        base = self.base_dt if self.base_dt is not None else DEFAULT_BASE_FRAME
+        work = most / (base + most) / self.res[5] * FAST_FILL
+        return max(MIN_FAST_CELLS, work / self.cost)
+
+    def _start_pass(self, player, target, view, corners, box, scene, fine):
+        """Begin a pass over the grid: a fine one with the full grid of the quality, or a fast
+        one with as many cells as there is time for."""
         shot = player.getVehicleDescriptor().shot
         shell = shot.shell
         kind = shell.kind
@@ -1338,11 +1454,7 @@ class Heatmap(object):
         own = player.getOwnVehiclePosition()
         distance = math.sqrt((cx - own.x) ** 2 + (cy - own.y) ** 2 + (cz - own.z) ** 2)
         full_pp = pen_at(shot, distance)
-        try:
-            g = player.gunRotator.getCurShotPosition()[0]
-            gun = (g.x, g.y, g.z)
-        except Exception:
-            gun = (own.x, own.y + 2.0, own.z)
+        gun = self._gun(player, own)
 
         # the part of the target's box that is on the screen, cut into square cells
         sw, sh = GUI.screenResolution()[:2]
@@ -1352,26 +1464,24 @@ class Heatmap(object):
         if w_px < 2.0 or h_px < 2.0:
             return
         grid_w, grid_h, min_cell = self.res[1:4]
-        cell = max(min_cell, w_px / grid_w, h_px / grid_h)
+        finest = max(min_cell, w_px / grid_w, h_px / grid_h)
+        cell = finest
+        if not fine:
+            cell = max(finest, math.sqrt(w_px * h_px / self._fast_cells()))
+        full = cell <= finest * 1.001     # a fast pass that could afford the whole grid
         gw = min(grid_w, max(1, int(math.ceil(w_px / cell - 1e-6))))
         gh = min(grid_h, max(1, int(math.ceil(h_px / cell - 1e-6))))
         cw, ch = cell * 2.0 / sw, cell * 2.0 / sh
         left = (x0 + x1) * 0.5 - gw * cw * 0.5
         top = (y0 + y1) * 0.5 + gh * ch * 0.5
 
-        key = (target.id, getattr(shell, 'compactDescr', kind), int(full_pp * 10.0),
-               _quant(view.pos, 50.0), _quant(view.fwd, 2000.0), _quant(view.up, 2000.0),
-               int(view.tan_y * 10000.0), tuple([_quant(c, 50.0) for c in corners]),
-               _quant(gun, 20.0), gw, gh)
-        if key == self.last_key:
-            return
         rules = Rules(shell, self.use_game_rules)
         cam_dist = math.sqrt((cx - view.pos[0]) ** 2 + (cy - view.pos[1]) ** 2
                              + (cz - view.pos[2]) ** 2)
         span = (max(view.near, cam_dist - radius - 0.5), cam_dist + radius + 0.5)
-        self.progress = (0, gw * gh, 0.0)
+        self.job_scene, self.job_fine = scene, fine
         self.job = self._pass(target, view, (gw, gh, left, top, cw, ch), span, box, rules,
-                              full_pp, gun, key, he_result)
+                              full_pp, gun, (scene, full), he_result)
 
     def _no_map(self, kind):
         """Shells the map is not drawn for: say so once and look again in a while."""
@@ -1382,8 +1492,9 @@ class Heatmap(object):
             self.logged.add(kind)
             log('no heatmap for %s shells' % kind)
 
-    def _pass(self, target, view, grid, span, box, rules, full_pp, gun, key, he_result):
-        """Cast the grid, a slice per frame (yields when self.deadline passes), then publish."""
+    def _pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result):
+        """Cast the grid, a slice per frame (yields when self.deadline passes), then publish.
+        done: (scene, full grid?), what self.last_key becomes when the pass ends."""
         gw, gh, left, top, cw, ch = grid
         t0, t1 = span
         cx, cy, cz = view.pos
@@ -1485,7 +1596,6 @@ class Heatmap(object):
                     codes[row + i] = code
                 if not (row + i) & 7 and clock() > self.deadline:
                     work += clock() - slice_start
-                    self.progress = (row + i + 1, gw * gh, work)
                     yield
                     slice_start = clock()
                     frames += 1
@@ -1497,36 +1607,37 @@ class Heatmap(object):
                         drift = None
 
         self._publish(target, codes, gw, gh, (left, top, gw * cw, gh * ch), box)
-        self.last_key = key
+        self.last_key = done
         self.passes += 1
         work += clock() - slice_start
-        self.cell_cost = work / (gw * gh)
-        # passes follow each other no faster than asked for, and no faster than they take
-        took = max(BigWorld.time() - self.pass_start, 1.0 / self.res[5], 1e-3)
-        self.measured = (1.0 / took, work * 1000.0 / frames)
+        # the cost of a cell on this computer, for sizing the fast passes: follow it, but do
+        # not let one odd pass throw it far
+        sample = work / (gw * gh)
+        if 0.5 < sample / self.cost < 2.0:
+            self.cost = self.cost * 0.7 + sample * 0.3
+        else:
+            self.cost = sample
+        self.cost_dirty = True
+        took = max(BigWorld.time() - self.pass_start, 1e-3)
+        fine = self.job_fine
+        if not fine:
+            # fast passes follow each other as often as asked for, if they take no longer
+            self.measured['fast'] = (gw, gh, 1.0 / max(took, 1.0 / self.res[5]))
+        if done[1]:
+            self.measured['fine'] = (gw, gh, took)
         if self.report:
-            self.report = False
+            self.report -= 1
             self.panel.redraw()
-        if self.cfg['debug'] or self.passes == 1:
-            log('pass %d: %s grid %dx%d, %d cells on armor, %d of them behind cover, %s pen '
-                '%.0f mm, %.1f ms of work in %d frames: %.1f updates a second at %.1f ms per frame'
-                % ((self.passes, target.typeDescriptor.type.name, gw, gh, hit_cells, covered_cells,
-                    shell.kind, full_pp, work * 1000.0, frames) + self.measured))
+        kind = 'fine pass' if fine else 'fast pass'
+        if self.cfg['debug'] or kind not in self.logged:
+            self.logged.add(kind)
+            log('%s %d: %s grid %dx%d, %d cells on armor, %d of them behind cover, %s pen '
+                '%.0f mm, %.1f ms of work in %d frames, %.2f s; a cell costs %.1f us'
+                % (kind, self.passes, target.typeDescriptor.type.name, gw, gh, hit_cells,
+                   covered_cells, shell.kind, full_pp, work * 1000.0, frames, took,
+                   self.cost * 1e6))
             if self.passes == 1:
                 log(self._resolution_text())
-
-    def _slice(self, now):
-        """Seconds of ray casting for this frame: what finishes the pass in time for the wanted
-        updates per second, but no more than slice_ms."""
-        most = self.res[4] / 1000.0
-        done, total, work = self.progress
-        cost = self.cell_cost
-        if cost is None and done >= 64:
-            cost = work / done
-        if cost is None or not self.frame_dt:
-            return most
-        frames = max(1.0, (self.pass_start + 1.0 / self.res[5] - now) / self.frame_dt)
-        return min(most, max(MIN_SLICE, (total - done) * cost * 1.15 / frames))
 
     # ---- frames ----
 
@@ -1539,8 +1650,9 @@ class Heatmap(object):
             return OFF_PERIOD
         now = BigWorld.time()
         if self.last_frame is not None and 0.0 < now - self.last_frame < 0.25:
-            dt = now - self.last_frame
-            self.frame_dt = dt if self.frame_dt is None else self.frame_dt * 0.8 + dt * 0.2
+            # what a frame takes when the mod does nothing: the room the passes have
+            base = max(0.0005, now - self.last_frame - self.mod_time)
+            self.base_dt = base if self.base_dt is None else self.base_dt * 0.8 + base * 0.2
         self.last_frame = now
         target = self._pick_target(player, now)
         if target is None:
@@ -1559,12 +1671,31 @@ class Heatmap(object):
             self._place(box)
         else:
             self._hide()
+        scene = None
+        if self.job is not None and self.job_fine:
+            scene = self._scene(player, target, view, corners, box)
+            if scene_moved(self.job_scene, scene):
+                # the target or the player moved: the fine map would be of the past
+                self.job = None
+                self.next_pass = now
         if self.job is None and now >= self.next_pass:
-            self.next_pass = now + 1.0 / self.res[5]
-            self.pass_start = now
-            self._start_pass(player, target, view, corners, box)
+            if scene is None:
+                scene = self._scene(player, target, view, corners, box)
+            done = self.last_key
+            if done is None or scene_moved(done[0], scene):
+                fine = False            # something moved: a fast pass
+            elif not done[1] or box_drifted(done[0][5], box):
+                fine = True             # nothing moved since a coarse map: now the full one
+            else:
+                fine = None             # the full map on screen still holds
+            if fine is None:
+                self.next_pass = now + STILL_CHECK_PERIOD
+            else:
+                self.next_pass = now + 1.0 / self.res[5]
+                self.pass_start = now
+                self._start_pass(player, target, view, corners, box, scene, fine)
         if self.job is not None:
-            self.deadline = time.clock() + self._slice(now)
+            self.deadline = time.clock() + self.res[4] / 1000.0
             try:
                 next(self.job)
             except StopIteration:
@@ -1583,7 +1714,9 @@ class Heatmap(object):
         if not self.in_battle:
             return
         try:
+            started = time.clock()
             delay = self._frame()
+            self.mod_time = time.clock() - started
             self.errors = 0
             if delay:
                 self.last_frame = None    # not called every frame: no frame time to measure
@@ -1613,7 +1746,7 @@ class Heatmap(object):
         # what is on screen was drawn with the old settings
         self.last_key = self.pic_sig = None
         self.next_pass = 0.0
-        self.report = True
+        self.report = 2     # the fast pass and the fine one after it
         if not cfg['enabled']:
             self._drop()
         elif self.in_battle and self.tick_cb is None:
@@ -1646,6 +1779,7 @@ class Heatmap(object):
         self.on_battle_end()
         self.cfg = _load_config(self.root)    # the file may have been edited between battles
         self.res = resolution(self.cfg)
+        self.cost = self._stored_cost()
         log(self._resolution_text())
         self.palette = self._make_palette()
         self.in_battle = True
@@ -1657,17 +1791,22 @@ class Heatmap(object):
     def _resolution_text(self):
         """The resolution in use and where to change it, for python.log."""
         name, grid_w, grid_h, min_cell, slice_ms, rate = self.res
-        return ('quality "%s": up to %dx%d cells, a cell at least %g px, %g updates a second '
-                'wanted, at most %g ms of work per frame. For a finer or coarser map set '
-                '"quality" to %s in %s (read at the start of a battle; max is for fast computers, '
-                'its map refreshes more slowly) or press Ctrl+Shift+G; grid_w, grid_h (up to 512), '
-                'min_cell_px, slice_ms and updates_per_sec there replace single values'
-                % (name, grid_w, grid_h, min_cell, rate, slice_ms, ' / '.join(QUALITY_ORDER),
-                   os.path.join(self.root, CONFIG_PATH)))
+        return ('quality "%s": up to %dx%d cells when nothing moves, a cell at least %g px; '
+                '%g updates a second while something moves, with as coarse a grid as that '
+                'takes at %g ms of work per frame and %.1f us per cell. Set "quality" to %s in '
+                '%s (read at the start of a battle) or press Ctrl+Shift+G; grid_w, grid_h '
+                '(up to 512), min_cell_px, slice_ms and updates_per_sec there replace single '
+                'values' % (name, grid_w, grid_h, min_cell, rate, slice_ms, self.cost * 1e6,
+                            ' / '.join(QUALITY_ORDER), os.path.join(self.root, CONFIG_PATH)))
 
     def on_battle_end(self):
         self.in_battle = False
         self.panel.close()    # its picture lives in the cache folder emptied below
+        if self.cost_dirty:
+            # what a cell costs here, for the first pass of the next battle
+            self.cost_dirty = False
+            self.cfg['_cell_cost_us'] = round(self.cost * 1e6, 2)
+            _store_value(self.root, '_cell_cost_us', self.cfg['_cell_cost_us'])
         if self.tick_cb is not None:
             try:
                 BigWorld.cancelCallback(self.tick_cb)
@@ -1678,8 +1817,11 @@ class Heatmap(object):
         self.job = None
         self.pic = self.pic_sig = self.last_key = self.cur_box = None
         self.errors, self.passes = 0, 0
-        self.cell_cost = self.frame_dt = self.last_frame = self.measured = None
-        self.report = False
+        self.job_scene, self.job_fine = None, False
+        self.base_dt = self.last_frame = None
+        self.mod_time = 0.0
+        self.measured = {}
+        self.report = 0
         self.logged.clear()
         self.cover_failed = False
         if self.comp is not None:

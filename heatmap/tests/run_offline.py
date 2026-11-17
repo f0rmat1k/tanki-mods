@@ -23,10 +23,11 @@ CACHE = os.path.join(ROOT, 'res_mods', '1.46.0.0', 'mods', 'heatmap_cache')
 os.makedirs(CACHE)
 os.makedirs(os.path.join(ROOT, 'mods', 'configs', 'heatmap'))
 CONFIG = os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.json')
-# the file 0.1.0 wrote: its fixed resolution must not pin the new default quality
+# the file 0.1.0 wrote: its fixed resolution must not pin the new default quality (and what a
+# cell costs in this test, where the collisions are Python: ten times the game's)
 with open(CONFIG, 'w') as f:
     f.write('{"alpha": 0.5, "enabled": true, "grid_h": 32, "grid_w": 48, "hold": 1.0, '
-            '"min_cell_px": 4, "slice_ms": 2.5, "margin": 0.1}')
+            '"min_cell_px": 4, "slice_ms": 2.5, "margin": 0.1, "_cell_cost_us": 150}')
 os.chdir(ROOT)
 
 
@@ -505,15 +506,26 @@ check(os.path.isfile(os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.j
       'default config written')
 import json  # noqa: E402
 saved = json.load(open(CONFIG))
-check(g.res == ('high', 80, 60, 2.0, 3.5, 10.0), '0.1.0 settings file moves to quality high %r' % (g.res,))
+check(g.res == ('high', 80, 60, 2.0, 4.0, 12.0), '0.1.0 settings file moves to quality high %r' % (g.res,))
 check(saved['quality'] == 'high' and saved['grid_w'] is None and saved['slice_ms'] is None
       and '_help' in saved and saved['alpha'] == 0.5, 'settings file rewritten with quality')
 orig_publish = g._publish
 
 
 def publish(target, codes, gw, gh, rect, box):
-    PUBLISHED.append((bytes(codes), gw, gh, rect, box))
+    entry = (bytes(codes), gw, gh, rect, box)
+    PUBLISHED.append(entry)
+    ALL.append(entry)
+    FINE[id(entry)] = bool(g.job_fine)
     orig_publish(target, codes, gw, gh, rect, box)
+
+
+ALL, FINE = [], {}     # every pass published, and whether it was a fine one
+
+
+def kinds(passes=None):
+    """'fast' / 'fine' of the passes (default: those in PUBLISHED)."""
+    return ['fine' if FINE[id(p)] else 'fast' for p in (PUBLISHED if passes is None else passes)]
 
 
 g._publish = publish
@@ -526,8 +538,13 @@ frames(30)
 check(not PUBLISHED and not ROOTS, 'nothing without a target')
 
 STATE.target = enemy
-frames(400)
-check(len(PUBLISHED) == 1, 'one pass for a still scene (%d)' % len(PUBLISHED))
+frames(600)
+check(kinds() == ['fast', 'fine'], 'a fast pass, then a fine one for a still scene %r' % kinds())
+fast = PUBLISHED[0]
+check(fast[1] * fast[2] < PUBLISHED[1][1] * PUBLISHED[1][2] / 3,
+      'the fast grid is coarse: %dx%d against %dx%d' % (fast[1:3] + PUBLISHED[1][1:3]))
+frames(300)
+check(len(PUBLISHED) == 2, 'and nothing more while nothing moves')
 codes, gw, gh, rect, box = PUBLISHED[-1]
 counts = [codes.count(chr(c)) for c in range(6)]
 print('     grid %dx%d, cells miss/pen/marginal/no_pen/ricochet/no_damage: %s' % (gw, gh, counts))
@@ -549,30 +566,51 @@ check(rows_hit[0] <= 1 and rows_hit[-1] >= gh - 2 and cols_hit[0] <= 1 and cols_
       'silhouette fills the box (rows %d-%d of %d, columns %d-%d of %d)'
       % (rows_hit[0], rows_hit[-1], gh, cols_hit[0], cols_hit[-1], gw))
 png = [f for f in os.listdir(CACHE) if f.endswith('.png')]
-check(len(png) == 1, 'one PNG in the cache')
-shutil.copy(os.path.join(CACHE, png[0]), os.path.join(OUT, 'ap.png'))
+check(len(png) == 2, 'the fast and the fine PNG in the cache')
+shutil.copy(os.path.join(CACHE, g.files[-1]), os.path.join(OUT, 'ap.png'))
+shutil.copy(os.path.join(CACHE, g.files[0]), os.path.join(OUT, 'ap_fast.png'))
 game_codes = codes
 
 # the port of the rules gives the same picture as the game's functions
 g.use_game_rules = False
 g.last_key = None
-frames(200)
-check(len(PUBLISHED) == 2 and PUBLISHED[-1][0] == game_codes, 'port of the rules = game rules')
-check(len(os.listdir(CACHE)) == 1, 'same picture: no new PNG')
+frames(600)
+check(kinds()[-2:] == ['fast', 'fine'] and PUBLISHED[-1][0] == game_codes,
+      'port of the rules = game rules')
 g.use_game_rules = True
 
-# the camera turns: the picture follows at once, a new pass comes later
+# the camera turns: the picture follows at once, and the fine map stays, it is still true
+n = len(PUBLISHED)
 before = comp.position
 STATE.cam = look_at((0.0, 6.0, -12.0), (2.5, 1.5, 22.0))
 frames(1)
-check(comp.position != before and len(PUBLISHED) == 2, 'picture follows the camera before a pass')
-frames(200)
-check(len(PUBLISHED) == 3, 'new pass after the camera moved')
-still = PUBLISHED[-1]
+check(comp.position != before and len(PUBLISHED) == n, 'picture follows the camera at once')
+frames(300)
+check(len(PUBLISHED) == n, 'turning the camera a little keeps the fine map')
+STATE.cam = look_at((0.0, 6.0, -12.0), (9.0, 1.5, 22.0))
+frames(600)
+check(kinds()[n:] == ['fine'], 'a long way across the screen: the fine map is cast again %r'
+      % kinds()[n:])
+STATE.cam = look_at((0.0, 6.0, -12.0), (2.5, 1.5, 22.0))
+frames(600)
+
+# the player drives a step: the camera and the gun move, a fast pass and then a fine one
+n = len(PUBLISHED)
+STATE.cam = look_at((1.5, 6.0, -12.0), (4.0, 1.5, 22.0))
+frames(600)
+check(kinds()[n:] == ['fast', 'fine'], 'the player moved: fast, then fine %r' % kinds()[n:])
+STATE.cam = look_at((0.0, 6.0, -12.0), (2.5, 1.5, 22.0))
+frames(600)
 
 # the target drives during a pass cut into many frames: the grid must not shear
+real_fast_cells = g._fast_cells
+g._fast_cells = lambda: 600.0
 g.res = g.res[:4] + (0.05,) + g.res[5:]
 g.last_key = None
+n = len(PUBLISHED)
+frames(150)
+check(kinds()[n:n + 1] == ['fast'], 'a fast pass of the still target to compare with')
+still = PUBLISHED[n]
 
 
 def drive():
@@ -580,16 +618,44 @@ def drive():
     enemy.matrix.translation = (p.x + 0.02, p.y, p.z)
 
 
-n_before = len(PUBLISHED)
+g.job = None
+g.last_key = None
+n = len(PUBLISHED)
 frames(400, each=drive)
-moved = [p for p in PUBLISHED[n_before:]]
-check(len(moved) >= 1, 'passes while the target drives (%d)' % len(moved))
+moved = PUBLISHED[n:]
+check(len(moved) >= 2 and set(kinds(moved)) == set(['fast']),
+      'only fast passes while the target drives (%d)' % len(moved))
 same = sum(1 for a, b in zip(moved[0][0], still[0]) if a == b)
 share = same / float(len(still[0]))
 print('     first moving pass: %.1f%% of the cells as in the still one' % (share * 100))
-check(moved[0][1:3] == still[1:3] and share > 0.97, 'moving target gives the still picture')
-g.res = g.res[:4] + (3.5,) + g.res[5:]
+check(moved[0][1:3] == still[1:3] and share > 0.95, 'moving target gives the still picture')
+g.res = g.res[:4] + (4.0,) + g.res[5:]
+g._fast_cells = real_fast_cells
+n = len(PUBLISHED)
+frames(600)
+check(kinds()[-1] == 'fine', 'the fine map comes once the target stops')
+
+# a fine pass is dropped the moment the target moves
+g.last_key = None
+frames(40)
+check(g.job is not None and g.job_fine, 'a fine pass under way')
+n = len(PUBLISHED)
+drive()
+drive()
+drive()
+drive()
+drive()
+drive()
+drive()
+drive()
+drive()
+drive()
+frames(2)
+check(g.job is not None and not g.job_fine and len(PUBLISHED) == n,
+      'it is dropped for a fast one when the target moves')
 enemy.matrix.translation = (1.0, 0.0, 22.0)
+frames(600)
+check(kinds()[-1] == 'fine', 'fine again after it stopped')
 
 # HEAT and HE
 STATE.player.shell.kind, STATE.player.shell.compactDescr = 'HOLLOW_CHARGE', 1002
@@ -701,23 +767,36 @@ for q in ('low', 'medium', 'high', 'ultra', 'max'):
 check(grids['low'][0] == 32 and grids['medium'][0] == 48 and grids['high'][0] == 80
       and grids['ultra'][0] == 128 and grids['max'][0] == 192, 'each quality gives a finer grid')
 check(battle_with(quality='max', grid_w=256, grid_h=256) is not None
-      and g.res == ('max + own numbers', 256, 256, 1.0, 8.0, 12.0) and PUBLISHED[-1][1] > 192,
+      and g.res == ('max + own numbers', 256, 256, 1.0, 8.0, 15.0) and PUBLISHED[-1][1] > 192,
       'a 256x256 grid can be set by hand')
 check(battle_with(quality='ULTRA', grid_w=100, grid_h=None, min_cell_px=3) is not None
-      and g.res == ('ultra + own numbers', 100, 96, 3.0, 5.0, 10.0), 'numbers replace preset values')
+      and g.res == ('ultra + own numbers', 100, 96, 3.0, 6.0, 15.0), 'numbers replace preset values')
 check(battle_with(quality='best', grid_w=None, min_cell_px=None) is not None
-      and g.res == ('high', 80, 60, 2.0, 3.5, 10.0), 'unknown quality falls back to high')
+      and g.res == ('high', 80, 60, 2.0, 4.0, 12.0), 'unknown quality falls back to high')
 check(battle_with(quality='high', grid_w=100000, slice_ms='fast') is not None
-      and g.res == ('high + own numbers', 512, 60, 2.0, 3.5, 10.0), 'bad numbers are clamped or dropped')
-# updates per second: the work is spread over the time a pass may take, not done at once
-check(battle_with(quality='low', grid_w=None, slice_ms=50, updates_per_sec=2) is not None
-      and g.res == ('low + own numbers', 32, 24, 6.0, 50.0, 2.0), 'updates per second from the file')
-print('     measured: %.2f updates a second, %.1f ms a frame' % g.measured)
-check(abs(g.measured[0] - 2.0) < 0.3 and g.measured[1] < 15.0,
-      'a pass is spread over half a second instead of taking 50 ms of each frame')
-check(battle_with(updates_per_sec=30) is not None and g.measured[0] > 3.0 * 2
-      and g.measured[1] > 15.0, 'more updates a second: more work per frame (%.1f/s, %.1f ms)'
-      % g.measured)
+      and g.res == ('high + own numbers', 512, 60, 2.0, 4.0, 12.0), 'bad numbers are clamped or dropped')
+# updates per second: the fast grid is sized to the time there is, by the measured cost
+def driving(seconds, **settings):
+    """Fast passes of a battle in which the target drives: (how many a second, cells each)."""
+    battle_with(**settings)
+    del PUBLISHED[:]
+    frames(int(seconds * 100), each=drive)
+    enemy.matrix.translation = (1.0, 0.0, 22.0)
+    cells = [p[1] * p[2] for p in PUBLISHED]
+    return len(PUBLISHED) / float(seconds), sum(cells) / float(len(cells) or 1)
+
+
+rate5, cells5 = driving(3, quality='max', slice_ms=8, updates_per_sec=5)
+check(set(kinds()) == set(['fast']), 'driving: fast passes only')
+rate10, cells10 = driving(3, updates_per_sec=10)
+print('     driving at max: %.1f passes a second of %d cells, %.1f of %d cells'
+      % (rate5, cells5, rate10, cells10))
+check(4.0 <= rate5 <= 5.4 and 8.0 <= rate10 <= 10.8, 'the asked number of updates a second is kept')
+check(1.5 < cells5 / cells10 < 2.7 and cells5 < 192 * 88 / 4,
+      'by a coarser grid: twice the rate, about half the cells')
+stored = json.load(open(CONFIG))['_cell_cost_us']
+check(50.0 < stored < 2000.0 and abs(g.cost * 1e6 - stored) < 0.3 * stored,
+      'the cost of a cell is kept in the settings file (%.1f us here)' % stored)
 battle_with(quality='high', grid_w=None, slice_ms=None, updates_per_sec=None)
 
 # ---- the settings panel ----
@@ -775,12 +854,12 @@ frames(2)
 CURSOR.position = (0.9, CURSOR.position[1])
 frames(3)
 check(g.cfg['alpha'] == 0.7 and g.panel.slider is None, 'drag ends when the button is released')
-check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 5.0, 10.0)
+check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 6.0, 15.0)
       and saved()['quality'] == 'ultra', 'quality chip')
 del PUBLISHED[:]
 frames(1500)
 check(PUBLISHED and PUBLISHED[-1][1] == 128, 'the map is recast at the new quality at once')
-check(click(('quality', 'max')) is True and g.res == ('max', 192, 144, 1.0, 8.0, 12.0), 'max chip')
+check(click(('quality', 'max')) is True and g.res == ('max', 192, 144, 1.0, 8.0, 15.0), 'max chip')
 panel_png('panel_max.png')
 check(click(('quality', 'ultra')) is True, 'back to ultra')
 
@@ -789,16 +868,17 @@ def number(key, sign):
     return [a for r, a in g.panel.hits if a[0] == 'number' and a[1] == key and a[2] * sign > 0][0]
 
 
-check(click(number('updates_per_sec', 1)) is True and g.res[5] == 11.0
-      and saved()['updates_per_sec'] == 11.0, 'updates per second + in the panel')
+check(click(number('updates_per_sec', 1)) is True and g.res[5] == 16.0
+      and saved()['updates_per_sec'] == 16.0, 'updates per second + in the panel')
 check(click(number('updates_per_sec', -1)) and click(number('updates_per_sec', -1))
-      and g.res[5] == 9.0, 'updates per second -')
-check(click(number('slice_ms', 1)) is True and g.res[4] == 5.5 and saved()['slice_ms'] == 5.5,
+      and g.res[5] == 14.0, 'updates per second -')
+check(click(number('slice_ms', 1)) is True and g.res[4] == 6.5 and saved()['slice_ms'] == 6.5,
       'ms per frame + in the panel')
 frames(1500)
-check(g.measured is not None and not g.report, 'the panel shows the measured rate after a pass')
+check('fast' in g.measured and 'fine' in g.measured and not g.report,
+      'the panel shows the measured passes')
 panel_png('panel_rate.png')
-check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 5.0, 10.0)
+check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 6.0, 15.0)
       and saved()['updates_per_sec'] is None, 'a quality chip puts its own numbers back')
 check(click(('toggle', 'show_allies')) is True and g.cfg['show_allies'] is True, 'allies toggle')
 
@@ -851,7 +931,7 @@ check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp
       'off from the panel hides the map')
 panel_png('panel_off.png')
 check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
-      and g.res == ('high', 80, 60, 2.0, 3.5, 10.0) and g.cfg['hide_covered'] and not g.cfg['show_allies'],
+      and g.res == ('high', 80, 60, 2.0, 4.0, 12.0) and g.cfg['hide_covered'] and not g.cfg['show_allies'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
 CURSOR.position = (-0.9, 0.9)
