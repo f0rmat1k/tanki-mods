@@ -40,6 +40,18 @@
       "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/gun_marks-v0.3.0/gun_marks_0.3.0.mtmod",
       "version": "0.3.0"
     },
+    "heatmap": {
+      "description": "В бою поверх танка под прицелом — цветная сетка: где ваш снаряд пробивает, где на грани, где нет и где рикошет. Ctrl+Shift+G — настройки, Ctrl+Shift+H — вкл/выкл",
+      "dirs": [
+        "res_mods/{client}/mods/heatmap_cache"
+      ],
+      "file": "heatmap_0.3.0.mtmod",
+      "name": "Тепловая карта пробития",
+      "sha256": "4443363812082da3f99b66398800d639881f577fb8f9c8ef616324f78fbd251f",
+      "size": 81867,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/heatmap-v0.3.0/heatmap_0.3.0.mtmod",
+      "version": "0.3.0"
+    },
     "nearyou_ranks": {
       "description": "Ранг и сложность танка из тир-листа Near_You в карусели ангара; фильтр в поиске: #S, #A+, #лёгкий",
       "dirs": [],
