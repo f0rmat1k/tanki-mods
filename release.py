@@ -40,6 +40,15 @@ MODS = {
         'dirs': [],
         'hidden': True,
     },
+    'heatmap': {
+        'version_file': 'heatmap/mod/mod_heatmap.py',
+        'built': 'heatmap/build/heatmap_{version}.mtmod',
+        'name': u'Тепловая карта пробития',
+        'description': u'В бою поверх танка под прицелом — цветная сетка: где ваш снаряд пробивает, '
+                       u'где на грани, где нет и где рикошет. Ctrl+Shift+G — настройки, '
+                       u'Ctrl+Shift+H — вкл/выкл',
+        'dirs': ['res_mods/{client}/mods/heatmap_cache'],
+    },
     'nearyou_ranks': {
         'version_file': 'nearyou_ranks/mod/mod_nearyou.py',
         'built': 'nearyou_ranks/build/nearyou_ranks_{version}.mtmod',
