@@ -27,19 +27,23 @@ the target's box on the screen every frame. There are two kinds of pass:
 the mouse only slides the picture and keeps the fine map. The cost of a cell is measured in
 every pass and kept between battles in the settings file.
 
-Resolution: "quality" in the settings file picks a preset (low, medium, high, ultra, max: see
-QUALITY): the most cells across and down the target (the fine map), the smallest cell on the
-screen, the most milliseconds of work per frame and the updates per second of the fast map.
-A number in grid_w, grid_h,
-min_cell_px, slice_ms or updates_per_sec replaces the preset's value; null takes it from the
-preset. The file is read again at the start of every battle.
+Speed or quality: one setting, `balance`, from 0 to 100, the slider of the settings panel.
+Towards 0 the fast map is recast more often, with a coarser grid, and the fine map is less
+fine; towards 100 the grids are finer and the fast map is recast less often (balance_values).
+How much of a frame the passes may take is not asked: they may make a frame twice as long as
+it is without them, as measured on the frames between passes and kept between battles, but not
+bring the game below 45 frames a second (Heatmap._slice).
+For fine tuning a number in grid_w, grid_h, min_cell_px, updates_per_sec or slice_ms of the
+settings file replaces what `balance` gives; null takes it from `balance`. The file is read
+again at the start of every battle.
 
 The picture is a PNG in res_mods/<client>/mods/heatmap_cache shown with GUI.Simple. paths.xml
 mounts res_mods with cacheSubdirs, so the folder must exist before the game starts
 (build_mod.py --install creates it; the mod creates it too, then one restart is needed).
 
 Ctrl+Shift+H in battle turns the heatmap on and off. Ctrl+Shift+G, in the hangar or in battle,
-opens the settings panel: on / off, quality, refresh, transparency, cover, allies. Like the heatmap it
+opens the settings panel: on / off, speed or quality, transparency, cover, the best point,
+allies. Like the heatmap it
 is a PNG the mod draws itself and shows with GUI.Simple; mouse clicks are hit-tested against it.
 In battle the game shows the cursor while Ctrl is held, and the map stays on the last target
 while the panel is open, so a change is seen at once. The captions use the bitmap font packed with
@@ -86,20 +90,22 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.5.1'
+__version__ = '0.6.0'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
 DEFAULTS = {
-    '_help': ('quality: low, medium, high, ultra or max: the finest map, drawn when nothing '
-              'moves. grid_w, grid_h (up to 512), min_cell_px, slice_ms (most milliseconds of '
-              'work per frame), updates_per_sec (map refreshes per second while something moves, '
-              '1-30: the map gets as coarse as that takes): a number replaces the value of the '
-              'chosen quality, null takes it from the quality'),
+    '_help': ('balance: 0 (speed: while something moves the map is recast more often, with a '
+              'coarser grid) to 100 (quality: finer grids, recast less often); the slider of the '
+              'settings panel, Ctrl+Shift+G. For fine tuning a number in grid_w, grid_h (up to '
+              '512), min_cell_px, updates_per_sec (1-30) or slice_ms (most milliseconds of work '
+              'per frame; null: found from the frame rate) replaces what balance gives, null '
+              'takes it from balance. Moving the slider puts null back into all five'),
     '_cell_cost_us': None,    # microseconds a cell costs on this computer: measured, not set
+    '_frame_ms': None,        # milliseconds between frames without the mod: measured, not set
     'enabled': True,
-    'quality': 'high',        # the resolution preset: a key of QUALITY
-    'grid_w': None,           # most cells across the target ...
+    'balance': 50,            # 0 speed ... 100 quality: see balance_values
+    'grid_w': None,           # most cells across the target (the fine map) ...
     'grid_h': None,           # ... and down; cells are square, a far target gets fewer
     'min_cell_px': None,      # a cell is never smaller than this on the screen
     'slice_ms': None,         # most milliseconds of ray casting per frame
@@ -122,28 +128,33 @@ DEFAULTS = {
     'debug': False,
 }
 
-# quality -> (grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec). The grid is the fine map's
-# and is only full on a target that is large on the screen: cells never get smaller than
-# min_cell_px. In the game a cell costs some 15 microseconds, so the full grid of "max" is about
-# 400 ms of work, and the 8 ms a frame of "max" buy some 3000 cells in each of 15 fast passes
-# a second on a computer that runs the game at 240 frames a second
-QUALITY = {
-    'low': (32, 24, 6, 2.0, 8),
-    'medium': (48, 32, 4, 3.0, 10),
-    'high': (80, 60, 2, 4.0, 12),
-    'ultra': (128, 96, 1, 6.0, 15),
-    'max': (192, 144, 1, 8.0, 15),
-}
-QUALITY_ORDER = ('low', 'medium', 'high', 'ultra', 'max')
-QUALITY_KEYS = ('grid_w', 'grid_h', 'min_cell_px', 'slice_ms', 'updates_per_sec')
+# the two ends of `balance`: (grid_w of the fine map, min_cell_px, updates_per_sec of the fast
+# map). The grid is only full on a target that is large on the screen: cells never get smaller
+# than min_cell_px. In the game a cell costs some 15 microseconds, so the full grid of the
+# quality end is about 0.7 s of work, and the middle of the scale about 0.2 s
+BALANCE_SPEED = (64, 3.0, 20.0)
+BALANCE_QUALITY = (256, 1.0, 8.0)
+GRID_ASPECT = 0.75            # grid_h over grid_w
+BALANCE_STEP = 5              # the slider's step
+# the quality presets of 0.2 - 0.5.1 as places on that scale
+OLD_QUALITY = {'low': 15, 'medium': 30, 'high': 50, 'ultra': 60, 'max': 75}
+# settings of earlier versions that are gone
+GONE_KEYS = ('quality', 'smooth', 'refresh_period')
+TUNING_KEYS = ('grid_w', 'grid_h', 'min_cell_px', 'slice_ms', 'updates_per_sec')
 # (lowest, highest) a setting may be, whatever the file says
-QUALITY_LIMITS = ((4, 512), (4, 512), (1.0, 64.0), (0.05, 50.0), (1.0, 30.0))
+TUNING_LIMITS = ((4, 512), (4, 512), (1.0, 64.0), (0.05, 50.0), (1.0, 30.0))
+# the work per frame when slice_ms is not set, from the time between frames without the mod
+FRAME_STRETCH = 2.0           # the passes may make a frame this many times longer ...
+MIN_FPS = 45.0                # ... but not bring the game below this many frames a second ...
+MAX_SLICE = 0.010             # ... nor take more than this, seconds;
+MIN_SLICE = 0.0015            # this much they may always take
+DEFAULT_IDLE_FRAME = 0.010    # seconds between frames without the mod, until it is measured
+IDLE_WORK = 0.0005            # a frame in which the mod took less than this counts as without it
 
 # fast passes: the grid is sized to what the time between two updates pays for
 DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the game
 FAST_FILL = 0.85              # share of that time a fast pass is planned to take
 MIN_FAST_CELLS = 200          # a fast grid is never coarser than this many cells
-DEFAULT_BASE_FRAME = 0.005    # seconds a frame takes without the mod, until it is measured
 # "nothing moved" between two scenes (see scene_moved)
 STILL_VIEW_COS = math.cos(math.radians(0.5))   # the side the camera sees the target from
 STILL_GUN_COS = math.cos(math.radians(0.4))    # the side the gun shoots at it from
@@ -155,8 +166,6 @@ REFRESH_SIZE = 0.05           # share of the box's width or height
 REFRESH_SHIFT = 0.15          # clip units (the screen is 2 wide) the box moved
 REFRESH_SHIFT_CUT = 0.02      # ... if the screen edge cut the box: it was cast only where seen
 STILL_CHECK_PERIOD = 0.05     # seconds between looks whether a finished fine map still holds
-# 0.1.0 wrote its fixed resolution into the file: those values are not the user's choice
-LEGACY_RESOLUTION = {'grid_w': 48, 'grid_h': 32, 'min_cell_px': 4, 'slice_ms': 2.5}
 
 MISS, PEN, MARGINAL, NO_PEN, RICOCHET, NO_DAMAGE = range(6)
 COVERED = 8               # added to a cell's code: the same outcome, seen through cover
@@ -238,21 +247,19 @@ def _load_config(root):
         if os.path.isfile(path):
             with open(path) as f:
                 user = json.load(f)
-            # settings added since the file was written go into it, so they can be found there
-            # ... and settings that are gone leave it
-            rewrite = bool(set(DEFAULTS) - set(user)) or 'smooth' in user or 'refresh_period' in user
-            if 'quality' not in user:
-                for key, value in LEGACY_RESOLUTION.items():
-                    if user.get(key) == value:
-                        del user[key]
-            # before 0.3.1 the pause between passes was set in seconds: keep a chosen one
-            user.pop('smooth', None)    # an option of 0.1-0.4.0 that is gone
-            period = user.pop('refresh_period', None)
-            if 'updates_per_sec' not in user and period not in (None, 0.12):
-                try:
-                    user['updates_per_sec'] = int(round(1.0 / float(period)))
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
+            # settings added since the file was written go into it, so they can be found there,
+            # and settings that are gone leave it
+            rewrite = bool(set(DEFAULTS) - set(user)) or bool(set(GONE_KEYS) & set(user))
+            if 'balance' not in user:
+                # a file of 0.1 - 0.5.1: its quality preset becomes a place on the scale, and
+                # the numbers its panel wrote step aside, or the slider would not be heard
+                old = OLD_QUALITY.get(str(user.get('quality')).strip().lower())
+                if old is not None:
+                    user['balance'] = old
+                for key in TUNING_KEYS:
+                    user.pop(key, None)
+            for key in GONE_KEYS:
+                user.pop(key, None)
             colors = user.pop('colors', None)
             cfg.update(user)
             if isinstance(colors, dict):
@@ -267,17 +274,29 @@ def _load_config(root):
     return cfg
 
 
+def balance_values(balance):
+    """(grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec) for a place on the scale from
+    0, speed, to 100, quality. The grid and the pace change by equal factors per step, the
+    smallest cell evenly; slice_ms is None: it is found from the frame rate."""
+    b = min(max(float(balance), 0.0), 100.0) / 100.0
+    (w0, cell0, rate0), (w1, cell1, rate1) = BALANCE_SPEED, BALANCE_QUALITY
+    grid_w = w0 * (float(w1) / w0) ** b
+    return (int(round(grid_w)), int(round(grid_w * GRID_ASPECT)),
+            round(cell0 + (cell1 - cell0) * b, 2), None, round(rate0 * (rate1 / rate0) ** b, 1))
+
+
 def resolution(cfg):
-    """(quality name, grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec) the settings ask
-    for: the preset of cfg['quality'] with the numbers given in the file put over it."""
-    name = str(cfg.get('quality')).strip().lower()
-    if name not in QUALITY:
-        log('unknown quality %r: using %r (choose from %s)'
-            % (cfg.get('quality'), DEFAULTS['quality'], ', '.join(QUALITY_ORDER)))
-        name = DEFAULTS['quality']
+    """(label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec, balance) the
+    settings ask for: what `balance` gives, with the numbers given in the file put over it.
+    slice_ms None: the mod finds it from the frame rate."""
+    try:
+        balance = min(max(float(cfg.get('balance')), 0.0), 100.0)
+    except (TypeError, ValueError):
+        log('bad balance %r in the settings: using %s' % (cfg.get('balance'), DEFAULTS['balance']))
+        balance = float(DEFAULTS['balance'])
     values = []
     custom = False
-    for key, preset, (lowest, highest) in zip(QUALITY_KEYS, QUALITY[name], QUALITY_LIMITS):
+    for key, preset, (lowest, highest) in zip(TUNING_KEYS, balance_values(balance), TUNING_LIMITS):
         value = cfg.get(key)
         if value is None or isinstance(value, bool):
             value = preset
@@ -289,8 +308,8 @@ def resolution(cfg):
                 log('bad %s %r in the settings: using %s' % (key, value, preset))
                 value = preset
         values.append(value)
-    return (name + ' + own numbers' if custom else name, int(values[0]), int(values[1]),
-            float(values[2]), float(values[3]), float(values[4]))
+    return ('balance %g%s' % (balance, ' + own numbers' if custom else ''), int(values[0]),
+            int(values[1]), float(values[2]), values[3], float(values[4]), balance)
 
 
 def _save_config(root, cfg):
@@ -748,12 +767,10 @@ P_BOX = (52, 56, 61, 255)
 P_EDGE = (96, 100, 106, 255)
 P_ON = (60, 150, 70, 255)
 P_BUTTON = (59, 63, 69, 255)
-QUALITY_LABELS = {'low': u'низкое', 'medium': u'среднее', 'high': u'высокое', 'ultra': u'ультра',
-                  'max': u'макс'}
 LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
-PANEL_DEFAULTS = ('enabled', 'quality') + QUALITY_KEYS + ('alpha', 'hide_covered', 'best_point',
+PANEL_DEFAULTS = ('enabled', 'balance') + TUNING_KEYS + ('alpha', 'hide_covered', 'best_point',
                   'show_allies')
 TRANSPARENCY_STEP = 5     # percent
 
@@ -868,13 +885,13 @@ def render_panel(cfg, res, font, measured=None):
     measured: {'fast': (grid w, h, passes a second), 'fine': (grid w, h, seconds it took)} of
     the last passes of this battle, as far as there were any.
 
-    Actions: ('toggle', key), ('quality', name), ('number', key, step, lowest, highest),
-    ('step', percent), ('slider', x0, x1) with the track's ends, ('reset',), ('close',).
+    Actions: ('toggle', key), ('step', percent) of transparency, ('slider', key, x0, x1) with
+    the track's ends, for 'alpha' and 'balance', ('reset',), ('close',).
     """
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 9 + P_HINT_ROW * 2 + P_FOOTER
+    h = P_HEADER + 8 + ROW * 7 + P_HINT_ROW + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -890,17 +907,13 @@ def render_panel(cfg, res, font, measured=None):
         c.text(font, PAD, mid(y, y + ROW), label, P_TEXT if key != 'enabled' or on else P_HINT)
         hits.append(((0, y, W, y + ROW), ('toggle', key)))
 
-    def number(y, key, label, value, step, lowest, highest):
-        # label ... [-] value [+]
-        c.text(font, PAD, mid(y, y + ROW), label, P_TEXT)
-        plus = (W - PAD - 24, y + 3, W - PAD, y + ROW - 3)
-        minus = (plus[0] - 6 - 56 - 6 - 24, y + 3, plus[0] - 6 - 56 - 6, y + ROW - 3)
-        for r, kind, delta in ((minus, '-', -step), (plus, '+', step)):
-            c.box(r, P_BUTTON, P_EDGE)
-            c.sign(r, kind, P_TEXT)
-            hits.append((r, ('number', key, delta, lowest, highest)))
-        text = u'%g' % value
-        c.text(font, minus[2] + 6 + (56 - width(text)) // 2, mid(y, y + ROW), text, P_VALUE)
+    def slider(y, key, track, share):
+        # a track filled up to the knob; clicked or dragged anywhere along it
+        c.box(track, P_BOX, P_EDGE)
+        knob = track[0] + int(round((track[2] - track[0]) * share))
+        c.rect(track[0] + 1, track[1] + 1, knob, track[3] - 1, P_VALUE)
+        c.box((knob - 4, y + 5, knob + 4, y + ROW - 5), P_TEXT + (255,), P_EDGE)
+        hits.append(((track[0] - 5, y, track[2] + 5, y + ROW), ('slider', key, track[0], track[2])))
 
     c.rect(0, 0, W, P_HEADER, P_HEADER_BG)
     c.text(font, PAD, mid(0, P_HEADER), u'Тепловая карта пробития', P_TEXT)
@@ -913,44 +926,24 @@ def render_panel(cfg, res, font, measured=None):
     toggle(y, 'enabled', u'Тепловая карта включена')
     y += ROW
 
-    # quality: one chip per preset, the chosen one lit
-    c.text(font, PAD, mid(y, y + ROW), u'Качество', P_TEXT)
-    chosen = res[0].split(' ')[0]
-    x1 = W - PAD
-    for level in reversed(xrange(len(QUALITY_ORDER))):
-        name = QUALITY_ORDER[level]
-        label = QUALITY_LABELS[name]
-        cw = max(width(label) + 16, 48)
-        on = name == chosen
-        r = (x1 - cw, y + 3, x1, y + ROW - 3)
-        c.box(r, P_ON if on else P_BOX, P_EDGE)
-        if font is None:
-            for k in xrange(level + 1):     # more bars, finer map
-                c.rect(r[0] + 5 + k * 8, r[3] - 5 - 3 * (k + 1), r[0] + 10 + k * 8, r[3] - 5,
-                       P_TEXT if on else P_HINT)
-        else:
-            c.text(font, r[0] + (cw - width(label)) // 2, mid(r[1], r[3]), label,
-                   P_TEXT if on else P_HINT)
-        hits.append(((r[0], y, r[2], y + ROW), ('quality', name)))
-        x1 -= cw + 6
-    y += ROW
-    hint = u'до %dx%d ячеек, когда ничего не движется' % res[1:3]
-    if res[0] != chosen:
-        hint += u' (свои числа)'
-    c.text(font, PAD, y + 2, hint, P_HINT)
-    y += P_HINT_ROW
-
-    # how often the map is recast, and what it may cost a frame
-    number(y, 'updates_per_sec', u'Обновлений в секунду в движении', res[5], 1, 1, 30)
-    y += ROW
-    number(y, 'slice_ms', u'Не больше, мс на кадр', res[4], 0.5, 0.5, 20)
+    # speed or quality: one slider for the grids and the pace (balance_values)
+    faster, finer = u'Быстрее', u'Подробнее'
+    c.text(font, PAD, mid(y, y + ROW), faster, P_TEXT)
+    c.text(font, W - PAD - width(finer), mid(y, y + ROW), finer, P_TEXT)
+    slider(y, 'balance', (PAD + width(faster) + 14, y + 11, W - PAD - width(finer) - 14,
+                          y + ROW - 11), res[6] / 100.0)
     y += ROW
     parts = []
     if measured and 'fast' in measured:
         parts.append(u'в движении %dx%d, %.0f раз/с' % measured['fast'])
     if measured and 'fine' in measured:
         parts.append(u'стоя %dx%d за %.2f с' % measured['fine'])
-    hint = u'; '.join(parts) or u'в движении сетка грубее, чтобы успевать обновляться'
+    if parts:
+        hint = u'; '.join(parts)
+    elif res[0].endswith('own numbers'):
+        hint = u'часть чисел задана в файле настроек; ползунок их сбросит'
+    else:
+        hint = u'левее — чаще обновляется в движении, правее — мельче сетка'
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
@@ -966,11 +959,7 @@ def render_panel(cfg, res, font, measured=None):
         c.box(r, P_BUTTON, P_EDGE)
         c.sign(r, kind, P_TEXT)
         hits.append((r, ('step', delta)))
-    c.box(track, P_BOX, P_EDGE)
-    knob = track[0] + int(round((track[2] - track[0]) * percent / 100.0))
-    c.rect(track[0] + 1, track[1] + 1, knob, track[3] - 1, P_VALUE)
-    c.box((knob - 4, y + 5, knob + 4, y + ROW - 5), P_TEXT + (255,), P_EDGE)
-    hits.append(((track[0] - 5, y, track[2] + 5, y + ROW), ('slider', track[0], track[2])))
+    slider(y, 'alpha', track, percent / 100.0)
     y += ROW
 
     # the colors as they come out with this transparency, over light and dark ground
@@ -1056,7 +1045,7 @@ class Panel(object):
         self.file_name = None
         self.swallow_release = False
         self.last_event = None  # the same click can arrive via the GUI script and the key hook
-        self.slider = None      # (x0, x1) of the track in panel pixels while it is dragged
+        self.slider = None      # (key, x0, x1) of the track in panel pixels while it is dragged
         self.drag_cb = None
         self._font = _MISSING
 
@@ -1206,19 +1195,11 @@ class Panel(object):
             return self.close()
         if kind == 'toggle':
             changes = {action[1]: not cfg[action[1]]}
-        elif kind == 'quality':
-            # a preset is chosen as a whole: numbers put into the file by hand step aside
-            changes = dict.fromkeys(QUALITY_KEYS)
-            changes['quality'] = action[1]
-        elif kind == 'number':
-            key, delta, lowest, highest = action[1:]
-            value = self.owner.res[QUALITY_KEYS.index(key) + 1] + delta
-            changes = {key: round(min(max(value, lowest), highest), 2)}
         elif kind == 'step':
             changes = {'alpha': alpha_of(transparency(cfg) + action[1])}
         elif kind == 'slider':
-            self.slider = (action[1], action[2])
-            changes = {'alpha': self._slider_alpha(x)}
+            self.slider = action[1:]
+            changes = self._slider_changes(x)
             if self.drag_cb is None:
                 self.drag_cb = BigWorld.callback(0.0, self._drag_step)
         elif kind == 'reset':
@@ -1227,9 +1208,16 @@ class Panel(object):
             return
         self.owner.apply_settings(changes)
 
-    def _slider_alpha(self, x):
-        x0, x1 = self.slider
-        return alpha_of((x - x0) * 100.0 / (x1 - x0))
+    def _slider_changes(self, x):
+        """The settings for the knob of the dragged slider at x across the panel."""
+        key, x0, x1 = self.slider
+        percent = (x - x0) * 100.0 / (x1 - x0)
+        if key == 'alpha':
+            return {'alpha': alpha_of(percent)}
+        # the slider speaks for all the numbers: ones put into the file by hand step aside
+        changes = dict.fromkeys(TUNING_KEYS)
+        changes[key] = min(max(int(round(percent / BALANCE_STEP)) * BALANCE_STEP, 0), 100)
+        return changes
 
     def _drag_step(self):
         """Every frame while the button is held on the track: the knob follows the cursor."""
@@ -1240,9 +1228,10 @@ class Panel(object):
             if not BigWorld.isKeyDown(Keys.KEY_LEFTMOUSE):
                 self.slider = None
                 return
-            alpha = self._slider_alpha(self._cursor()[0] - self.rect[0])
-            if alpha != self.owner.cfg['alpha']:
-                self.owner.apply_settings({'alpha': alpha})
+            changes = self._slider_changes(self._cursor()[0] - self.rect[0])
+            cfg = self.owner.cfg
+            if any(cfg.get(key) != value for key, value in changes.items()):
+                self.owner.apply_settings(changes)
             self.drag_cb = BigWorld.callback(0.0, self._drag_step)
         except Exception:
             self.slider = None
@@ -1272,7 +1261,7 @@ class Heatmap(object):
     def __init__(self):
         self.root = _game_root()
         self.cfg = _load_config(self.root)
-        # (quality, grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec)
+        # (label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec, balance)
         self.res = resolution(self.cfg)
         self.res_mods = _res_mods_dir(self.root)
         self.cache_vfs = 'mods/%s_cache' % MOD_ID
@@ -1309,9 +1298,15 @@ class Heatmap(object):
         self.cover_failed = False     # the scene ray raised: no cover test for this battle
         self.passes = 0
         self.pass_start = 0.0     # BigWorld.time() the pass in progress began at
-        self.cost = self._stored_cost()   # seconds of work per cell, smoothed over the passes
+        # seconds of work per cell, smoothed over the passes
+        self.cost = self._stored('_cell_cost_us', 1e-6, DEFAULT_CELL_COST)
         self.cost_dirty = False   # ... measured in this battle, to be stored after it
-        self.base_dt = None       # seconds a frame takes without the mod's work, smoothed
+        self.frame_dirty = False  # ... and so was idle_dt
+        # seconds between frames when the mod does nothing: what the game runs at
+        self.idle_dt = self._stored('_frame_ms', 1e-3, DEFAULT_IDLE_FRAME)
+        # seconds of a frame that are not the mod's while a pass runs (None: not known yet);
+        # less than idle_dt when the game waits for the video card or a frame limit
+        self.base_dt = None
         self.mod_time = 0.0       # seconds the mod took in the last frame
         self.last_frame = None
         self.measured = {}        # see render_panel
@@ -1542,15 +1537,29 @@ class Heatmap(object):
 
     # ---- the pass ----
 
-    def _stored_cost(self):
-        """Seconds a cell costs, as measured in earlier battles (the settings file keeps it)."""
+    def _stored(self, key, unit, default):
+        """A measurement of earlier battles kept in the settings file, in seconds."""
         try:
-            micro = float(self.cfg.get('_cell_cost_us'))
-            if 1.0 <= micro <= 1000.0:
-                return micro * 1e-6
+            value = float(self.cfg.get(key))
+            if 0.5 <= value <= 1000.0:
+                return value * unit
         except (TypeError, ValueError):
             pass
-        return DEFAULT_CELL_COST
+        return default
+
+    def _base(self):
+        """Seconds of a frame that are the game's own while a pass runs."""
+        return self.base_dt if self.base_dt is not None else self.idle_dt * 0.5
+
+    def _slice(self):
+        """Seconds of ray casting a frame may take: slice_ms of the settings file if it is
+        set, else what makes a frame FRAME_STRETCH times as long as without the mod, with the
+        game kept above MIN_FPS as far as MIN_SLICE allows."""
+        if self.res[4] is not None:
+            return self.res[4] / 1000.0
+        base = self._base()
+        return max(MIN_SLICE, min(MAX_SLICE, self.idle_dt * FRAME_STRETCH - base,
+                                  1.0 / MIN_FPS - base))
 
     @staticmethod
     def _gun(player, own):
@@ -1586,9 +1595,11 @@ class Heatmap(object):
     def _fast_cells(self):
         """How many cells a fast pass may have to be done in time for the next one: the work
         the frames between two updates have room for, by the cost of a cell."""
-        most = self.res[4] / 1000.0
-        base = self.base_dt if self.base_dt is not None else DEFAULT_BASE_FRAME
-        work = most / (base + most) / self.res[5] * FAST_FILL
+        most = self._slice()
+        # a frame with a slice in it lasts the game's part and the slice, or as long as a
+        # frame without the mod if that is longer
+        frame = max(self.idle_dt, self._base() + most)
+        work = most / frame / self.res[5] * FAST_FILL
         return max(MIN_FAST_CELLS, work / self.cost)
 
     def _start_pass(self, player, target, view, corners, box, scene, fine):
@@ -1880,9 +1891,14 @@ class Heatmap(object):
             return OFF_PERIOD
         now = BigWorld.time()
         if self.last_frame is not None and 0.0 < now - self.last_frame < 0.25:
-            # what a frame takes when the mod does nothing: the room the passes have
-            base = max(0.0005, now - self.last_frame - self.mod_time)
-            self.base_dt = base if self.base_dt is None else self.base_dt * 0.8 + base * 0.2
+            dt = now - self.last_frame
+            if self.mod_time < IDLE_WORK:
+                # no pass in that frame: the pace of the game itself
+                self.idle_dt = self.idle_dt * 0.9 + dt * 0.1
+                self.frame_dirty = True
+            else:
+                base = max(0.0005, dt - self.mod_time)
+                self.base_dt = base if self.base_dt is None else self.base_dt * 0.8 + base * 0.2
         self.last_frame = now
         target = self._pick_target(player, now)
         if target is None:
@@ -1931,7 +1947,7 @@ class Heatmap(object):
                 self.pass_start = now
                 self._start_pass(player, target, view, corners, box, scene, fine)
         if self.job is not None:
-            self.deadline = time.clock() + self.res[4] / 1000.0
+            self.deadline = time.clock() + self._slice()
             try:
                 next(self.job)
             except StopIteration:
@@ -2021,7 +2037,9 @@ class Heatmap(object):
         self.on_battle_end()
         self.cfg = _load_config(self.root)    # the file may have been edited between battles
         self.res = resolution(self.cfg)
-        self.cost = self._stored_cost()
+        self.cost = self._stored('_cell_cost_us', 1e-6, DEFAULT_CELL_COST)
+        self.idle_dt = self._stored('_frame_ms', 1e-3, DEFAULT_IDLE_FRAME)
+        self.base_dt = None
         log(self._resolution_text())
         self.palette = self._make_palette()
         self.in_battle = True
@@ -2031,15 +2049,18 @@ class Heatmap(object):
         self.tick_cb = BigWorld.callback(IDLE_PERIOD, self._tick)
 
     def _resolution_text(self):
-        """The resolution in use and where to change it, for python.log."""
-        name, grid_w, grid_h, min_cell, slice_ms, rate = self.res
-        return ('quality "%s": up to %dx%d cells when nothing moves, a cell at least %g px; '
-                '%g updates a second while something moves, with as coarse a grid as that '
-                'takes at %g ms of work per frame and %.1f us per cell. Set "quality" to %s in '
-                '%s (read at the start of a battle) or press Ctrl+Shift+G; grid_w, grid_h '
-                '(up to 512), min_cell_px, slice_ms and updates_per_sec there replace single '
-                'values' % (name, grid_w, grid_h, min_cell, rate, slice_ms, self.cost * 1e6,
-                            ' / '.join(QUALITY_ORDER), os.path.join(self.root, CONFIG_PATH)))
+        """The settings in use and where to change them, for python.log."""
+        name, grid_w, grid_h, min_cell, slice_ms, rate = self.res[:6]
+        if slice_ms is None:
+            budget = '%.1f ms of work per frame, found from the frame rate' % (self._slice() * 1e3)
+        else:
+            budget = '%g ms of work per frame, as set' % slice_ms
+        return ('%s (0 speed ... 100 quality): up to %dx%d cells when nothing moves, a cell at '
+                'least %g px; %g updates a second while something moves, with as coarse a grid '
+                'as that takes at %s and %.1f us per cell. The slider is in the panel, '
+                'Ctrl+Shift+G; the numbers can be set one by one in %s (read at the start of a '
+                'battle)' % (name, grid_w, grid_h, min_cell, rate, budget, self.cost * 1e6,
+                             os.path.join(self.root, CONFIG_PATH)))
 
     def on_battle_end(self):
         self.in_battle = False
@@ -2049,6 +2070,10 @@ class Heatmap(object):
             self.cost_dirty = False
             self.cfg['_cell_cost_us'] = round(self.cost * 1e6, 2)
             _store_value(self.root, '_cell_cost_us', self.cfg['_cell_cost_us'])
+        if self.frame_dirty:
+            self.frame_dirty = False
+            self.cfg['_frame_ms'] = round(self.idle_dt * 1e3, 2)
+            _store_value(self.root, '_frame_ms', self.cfg['_frame_ms'])
         if self.tick_cb is not None:
             try:
                 BigWorld.cancelCallback(self.tick_cb)
@@ -2060,7 +2085,7 @@ class Heatmap(object):
         self.pic = self.pic_sig = self.last_key = self.cur_box = None
         self.errors, self.passes = 0, 0
         self.job_scene, self.job_fine = None, False
-        self.base_dt = self.last_frame = None
+        self.last_frame = None
         self.mod_time = 0.0
         self.measured = {}
         self.report = 0

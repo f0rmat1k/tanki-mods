@@ -23,7 +23,7 @@ CACHE = os.path.join(ROOT, 'res_mods', '1.46.0.0', 'mods', 'heatmap_cache')
 os.makedirs(CACHE)
 os.makedirs(os.path.join(ROOT, 'mods', 'configs', 'heatmap'))
 CONFIG = os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.json')
-# the file 0.1.0 wrote: its fixed resolution must not pin the new default quality (and what a
+# the file 0.1.0 wrote: its fixed resolution must not outvote the slider (and what a
 # cell costs in this test, where the collisions are Python: ten times the game's; the mark of
 # the best point is off until its own checks, the ones before count the pictures on screen)
 with open(CONFIG, 'w') as f:
@@ -508,9 +508,9 @@ check(os.path.isfile(os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.j
       'default config written')
 import json  # noqa: E402
 saved = json.load(open(CONFIG))
-check(g.res == ('high', 80, 60, 2.0, 4.0, 12.0), '0.1.0 settings file moves to quality high %r' % (g.res,))
-check(saved['quality'] == 'high' and saved['grid_w'] is None and saved['slice_ms'] is None
-      and '_help' in saved and saved['alpha'] == 0.5, 'settings file rewritten with quality')
+check(g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0), '0.1.0 settings file: the middle of the scale %r' % (g.res,))
+check(saved['balance'] == 50 and saved['grid_w'] is None and saved['slice_ms'] is None
+      and '_help' in saved and saved['alpha'] == 0.5, 'settings file rewritten with balance')
 orig_publish = g._publish
 
 
@@ -550,7 +550,7 @@ check(len(PUBLISHED) == 2, 'and nothing more while nothing moves')
 codes, gw, gh, rect, box = PUBLISHED[-1]
 counts = [codes.count(chr(c)) for c in range(6)]
 print('     grid %dx%d, cells miss/pen/marginal/no_pen/ricochet/no_damage: %s' % (gw, gh, counts))
-check(gw <= 80 and gh <= 60 and (gw == 80 or gh == 60), 'grid fits the limits of high')
+check(100 < gw <= 128 and gh <= 96, 'cells of 2 px at the middle of the scale: %dx%d' % (gw, gh))
 check(counts[hm.PEN] > 20 and counts[hm.NO_PEN] > 20 and counts[hm.NO_DAMAGE] > 5,
       'penetrated, not penetrated and no-damage cells present')
 check(len(ROOTS) == 1 and ROOTS[0].visible, 'picture on screen')
@@ -631,7 +631,7 @@ same = sum(1 for a, b in zip(moved[0][0], still[0]) if a == b)
 share = same / float(len(still[0]))
 print('     first moving pass: %.1f%% of the cells as in the still one' % (share * 100))
 check(moved[0][1:3] == still[1:3] and share > 0.95, 'moving target gives the still picture')
-g.res = g.res[:4] + (4.0,) + g.res[5:]
+g.res = g.res[:4] + (None,) + g.res[5:]
 g._fast_cells = real_fast_cells
 n = len(PUBLISHED)
 frames(600)
@@ -760,23 +760,50 @@ def battle_with(**settings):
 
 
 grids = {}
-for q in ('low', 'medium', 'high', 'ultra', 'max'):
-    grids[q] = battle_with(quality=q)
-    print('     quality %-6s -> res %r, grid %r' % (q, g.res, grids[q]))
-    check(g.res[0] == q and g.res[1:] == tuple(float(v) if i > 1 else v
-                                                 for i, v in enumerate(hm.QUALITY[q])),
-          'quality %s read from the file' % q)
-check(grids['low'][0] == 32 and grids['medium'][0] == 48 and grids['high'][0] == 80
-      and grids['ultra'][0] == 128 and grids['max'][0] == 192, 'each quality gives a finer grid')
-check(battle_with(quality='max', grid_w=256, grid_h=256) is not None
-      and g.res == ('max + own numbers', 256, 256, 1.0, 8.0, 15.0) and PUBLISHED[-1][1] > 192,
-      'a 256x256 grid can be set by hand')
-check(battle_with(quality='ULTRA', grid_w=100, grid_h=None, min_cell_px=3) is not None
-      and g.res == ('ultra + own numbers', 100, 96, 3.0, 6.0, 15.0), 'numbers replace preset values')
-check(battle_with(quality='best', grid_w=None, min_cell_px=None) is not None
-      and g.res == ('high', 80, 60, 2.0, 4.0, 12.0), 'unknown quality falls back to high')
-check(battle_with(quality='high', grid_w=100000, slice_ms='fast') is not None
-      and g.res == ('high + own numbers', 512, 60, 2.0, 4.0, 12.0), 'bad numbers are clamped or dropped')
+for b in (0, 50, 100):
+    grids[b] = battle_with(balance=b)
+    print('     balance %-3d -> res %r, grid %r' % (b, g.res, grids[b]))
+    want = hm.balance_values(b)
+    check(g.res == ('balance %d' % b, want[0], want[1], want[2], None, want[4], float(b)),
+          'balance %d read from the file' % b)
+check(hm.balance_values(0) == (64, 48, 3.0, None, 20.0)
+      and hm.balance_values(50) == (128, 96, 2.0, None, 12.6)
+      and hm.balance_values(100) == (256, 192, 1.0, None, 8.0), 'the scale: speed, middle, quality')
+check(grids[0][0] < grids[50][0] < grids[100][0] and grids[100][0] > 150,
+      'towards quality the fine grid gets finer')
+check(battle_with(balance=100, grid_w=300, grid_h=300) is not None
+      and g.res == ('balance 100 + own numbers', 300, 300, 1.0, None, 8.0, 100.0)
+      and PUBLISHED[-1][1] > 150, 'a 300x300 grid can be set by hand')
+check(battle_with(balance=60, grid_w=100, grid_h=None, min_cell_px=3, slice_ms=5,
+                  updates_per_sec=9) is not None
+      and g.res == ('balance 60 + own numbers', 100, hm.balance_values(60)[1], 3.0, 5.0, 9.0, 60.0)
+      and g._slice() == 0.005, 'numbers in the file replace what the scale gives')
+check(battle_with(balance='best', grid_w=None, min_cell_px=None, slice_ms=None,
+                  updates_per_sec=None) is not None
+      and g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0), 'a bad balance falls back to the middle')
+check(battle_with(balance=50, grid_w=100000, slice_ms='fast') is not None
+      and g.res == ('balance 50 + own numbers', 512, 96, 2.0, None, 12.6, 50.0),
+      'bad numbers are clamped or dropped')
+battle_with(grid_w=None, slice_ms=None)
+# the work per frame is found from what a frame takes without the mod, and kept
+check(g.res[4] is None and 0.0015 <= g._slice() <= 0.010,
+      'work per frame from the frame rate: %.1f ms' % (g._slice() * 1e3))
+EVENTS.onAvatarBecomeNonPlayer()
+stored_frame = json.load(open(CONFIG))['_frame_ms']
+check(abs(stored_frame - 10.0) < 0.5 and abs(g.idle_dt * 1e3 - stored_frame) < 0.01,
+      'the time between frames is kept in the settings file (%.1f ms here)' % stored_frame)
+# a fast computer: 240 frames a second, 2.1 ms of them the game's own work
+g.idle_dt, g.base_dt = 1.0 / 240, 0.0021
+check(abs(g._slice() - (2.0 / 240 - 0.0021)) < 1e-9,
+      'at 240 frames a second the passes may halve them: %.1f ms a frame' % (g._slice() * 1e3))
+g.idle_dt, g.base_dt = 1.0 / 60, 0.014     # a slower one: no lower than 45 frames a second
+check(abs(g._slice() - (1.0 / 45 - 0.014)) < 1e-9, 'at 60 they take what leaves 45')
+g.idle_dt, g.base_dt = 1.0 / 120, 0.002    # much room in the frame: the cap
+check(g._slice() == 0.010, 'never more than 10 ms')
+g.idle_dt, g.base_dt = 1.0 / 30, 0.030
+check(g._slice() == 0.0015, 'at 30 the least')
+EVENTS.onAvatarReady()
+
 # updates per second: the fast grid is sized to the time there is, by the measured cost
 def driving(seconds, **settings):
     """Fast passes of a battle in which the target drives: (how many a second, cells each)."""
@@ -788,7 +815,7 @@ def driving(seconds, **settings):
     return len(PUBLISHED) / float(seconds), sum(cells) / float(len(cells) or 1)
 
 
-rate5, cells5 = driving(3, quality='max', slice_ms=8, updates_per_sec=5)
+rate5, cells5 = driving(3, balance=75, slice_ms=8, updates_per_sec=5)
 check(set(kinds()) == set(['fast']), 'driving: fast passes only')
 rate10, cells10 = driving(3, updates_per_sec=10)
 print('     driving at max: %.1f passes a second of %d cells, %.1f of %d cells'
@@ -799,7 +826,7 @@ check(1.5 < cells5 / cells10 < 2.7 and cells5 < 192 * 88 / 4,
 stored = json.load(open(CONFIG))['_cell_cost_us']
 check(50.0 < stored < 2000.0 and abs(g.cost * 1e6 - stored) < 0.3 * stored,
       'the cost of a cell is kept in the settings file (%.1f us here)' % stored)
-battle_with(quality='high', grid_w=None, slice_ms=None, updates_per_sec=None)
+battle_with(balance=50, grid_w=None, slice_ms=None, updates_per_sec=None)
 
 # ---- the settings panel ----
 PANEL_KEY = KeyEvent(34, ctrl=True, shift=True)
@@ -841,12 +868,12 @@ check(PUBLISHED and g.pic_sig[2] != old_rows and g.pic_sig[2][0][3] in ('\x00', 
       'the map is redrawn with the new transparency')
 alphas = set(ord(row[i]) for row in g.pic_sig[2] for i in range(3, len(row), 4))
 check(alphas == set([0, 114]), 'map alpha is %r' % sorted(alphas))
-slider = [a for r, a in g.panel.hits if a[0] == 'slider'][0]
+slider = [a for r, a in g.panel.hits if a[:2] == ('slider', 'alpha')][0]
 HELD.add(256)
 check(click(slider, at=0.8) is True and abs(g.cfg['alpha'] - 0.2) < 0.051,
       'click on the track sets the transparency (alpha %r)' % g.cfg['alpha'])
 r = [r for r, a in g.panel.hits if a == slider][0]
-x = g.panel.rect[0] + slider[1] + (slider[2] - slider[1]) * 0.30
+x = g.panel.rect[0] + slider[2] + (slider[3] - slider[2]) * 0.30
 CURSOR.position = (x / 960.0 - 1.0, CURSOR.position[1])
 frames(3)
 check(g.cfg['alpha'] == 0.7 and saved()['alpha'] == 0.7,
@@ -856,36 +883,43 @@ frames(2)
 CURSOR.position = (0.9, CURSOR.position[1])
 frames(3)
 check(g.cfg['alpha'] == 0.7 and g.panel.slider is None, 'drag ends when the button is released')
-check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 6.0, 15.0)
-      and saved()['quality'] == 'ultra', 'quality chip')
+# the speed - quality slider
+def balance_slider():
+    return [a for r, a in g.panel.hits if a[:2] == ('slider', 'balance')][0]
+
+
+check(click(balance_slider(), at=0.8) is True and g.cfg['balance'] == 80
+      and saved()['balance'] == 80 and g.res[:4] == ('balance 80',) + hm.balance_values(80)[:3],
+      'a click on the slider sets the balance (%r)' % (g.res,))
+HELD.clear()
+frames(2)
 del PUBLISHED[:]
 frames(1500)
-check(PUBLISHED and PUBLISHED[-1][1] == 128, 'the map is recast at the new quality at once')
-check(click(('quality', 'max')) is True and g.res == ('max', 192, 144, 1.0, 8.0, 15.0), 'max chip')
-panel_png('panel_max.png')
-check(click(('quality', 'ultra')) is True, 'back to ultra')
-
-
-def number(key, sign):
-    return [a for r, a in g.panel.hits if a[0] == 'number' and a[1] == key and a[2] * sign > 0][0]
-
-
-check(click(number('updates_per_sec', 1)) is True and g.res[5] == 16.0
-      and saved()['updates_per_sec'] == 16.0, 'updates per second + in the panel')
-check(click(number('updates_per_sec', -1)) and click(number('updates_per_sec', -1))
-      and g.res[5] == 14.0, 'updates per second -')
-check(click(number('slice_ms', 1)) is True and g.res[4] == 6.5 and saved()['slice_ms'] == 6.5,
-      'ms per frame + in the panel')
-frames(1500)
+check(PUBLISHED and kinds()[-1] == 'fine' and PUBLISHED[-1][1] > 100,
+      'the map is recast finer at once (%r)' % (PUBLISHED[-1][1:3],))
 check('fast' in g.measured and 'fine' in g.measured and not g.report,
       'the panel shows the measured passes')
-panel_png('panel_rate.png')
-check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 6.0, 15.0)
-      and saved()['updates_per_sec'] is None, 'a quality chip puts its own numbers back')
+panel_png('panel_balance.png')
+g.apply_settings({'updates_per_sec': 9, 'slice_ms': 3})
+check(g.res[0] == 'balance 80 + own numbers', 'numbers set by hand show')
+panel_png('panel_own.png')
+HELD.add(256)
+check(click(balance_slider(), at=0.2) is True and g.cfg['balance'] == 20
+      and saved()['updates_per_sec'] is None and saved()['slice_ms'] is None
+      and g.res[0] == 'balance 20', 'moving the slider puts the numbers of the file aside')
+bar = balance_slider()
+x = g.panel.rect[0] + bar[2] + (bar[3] - bar[2]) * 1.2
+CURSOR.position = (x / 960.0 - 1.0, CURSOR.position[1])
+frames(3)
+check(g.cfg['balance'] == 100 and saved()['balance'] == 100, 'dragging it past the end: 100')
+HELD.clear()
+frames(2)
+check(g.panel.slider is None, 'the drag ends')
 check(click(('toggle', 'show_allies')) is True and g.cfg['show_allies'] is True, 'allies toggle')
 
 # cover: a wall hides the left part of the target (the panel is still open, the map is held)
-check(click(('quality', 'high')) is True, 'high for the cover checks')
+check(click(balance_slider(), at=0.5) is True and g.cfg['balance'] == 50, 'the middle for the cover checks')
+frames(2)
 del PUBLISHED[:]
 frames(600)
 open_codes, gw, gh = PUBLISHED[-1][:3]
@@ -991,7 +1025,7 @@ check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp
       'off from the panel hides the map')
 panel_png('panel_off.png')
 check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
-      and g.res == ('high', 80, 60, 2.0, 4.0, 12.0) and g.cfg['hide_covered'] and not g.cfg['show_allies'],
+      and g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0) and g.cfg['hide_covered'] and not g.cfg['show_allies'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
 check(g.cfg['best_point'] is True, 'the defaults turn the best point on')
@@ -1025,11 +1059,11 @@ check(game.handleKeyEvent(key) is False, 'Ctrl+Shift+H does nothing in the hanga
 check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel opens in the hangar')
 check(click(('step', -5)) is True and g.cfg['alpha'] == 0.55 and saved()['alpha'] == 0.55,
       'transparency - in the hangar')
-check(click(('quality', 'medium')) and saved()['quality'] == 'medium', 'quality in the hangar')
+check(click(balance_slider(), at=0.3) and saved()['balance'] == 30, 'the slider in the hangar')
 panel_png('panel_hangar.png')
 STATE.player = avatar
 EVENTS.onAvatarReady()
-check(not g.panel.visible and g.res[0] == 'medium' and g.cfg['alpha'] == 0.55,
+check(not g.panel.visible and g.res[0] == 'balance 30' and g.cfg['alpha'] == 0.55,
       'hangar settings are used in the next battle')
 STATE.target = enemy
 frames(600)
@@ -1039,7 +1073,7 @@ check(len(ROOTS) == 1 and ROOTS[0].visible, 'map in that battle')
 g.panel._font = hm._MISSING
 FONT['on'] = False
 check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel without a font')
-check(click(('quality', 'high')) is True and g.res[0] == 'high', 'and it works')
+check(click(balance_slider(), at=0.5) is True and g.res[0] == 'balance 50', 'and it works')
 panel_png('panel_nofont.png')
 game.handleKeyEvent(KeyEvent(1))
 # find_best on drawn grids: G pierced, y close call, r not pierced, . beside the vehicle
@@ -1075,14 +1109,20 @@ check(best([r.replace('G', 'r') for r in FIELD], 3.0)[:2] in ((15, 4), (16, 4)),
 check(best(['....', '.rr.', '....'], 3.0) is None, 'nothing to pierce: no mark')
 check(best(['G'], 5.0) == (0, 0, False), 'a grid of one cell')
 
-# settings files written before 0.3.1 gave the pause between passes in seconds
-for period, want in ((0.25, 4), (0.12, None)):
-    with open(CONFIG, 'w') as f:
-        json.dump({'quality': 'high', 'refresh_period': period, 'smooth': True}, f)
-    cfg = hm._load_config(ROOT)
-    check('smooth' not in cfg and 'smooth' not in saved(), 'the smooth option of old files is dropped')
-    check(cfg['updates_per_sec'] == want and 'refresh_period' not in cfg
-          and 'refresh_period' not in saved(), 'refresh_period %s -> updates_per_sec %s' % (period, want))
+# settings files of earlier versions: the quality preset becomes a place on the scale, and the
+# numbers the old panel wrote do not outvote the slider
+with open(CONFIG, 'w') as f:
+    json.dump({'quality': 'max', 'updates_per_sec': 15, 'slice_ms': 8, 'grid_w': 192,
+               'refresh_period': 0.25, 'smooth': True, 'alpha': 0.3, 'best_point': False}, f)
+cfg = hm._load_config(ROOT)
+check(cfg['balance'] == 75 and cfg['alpha'] == 0.3 and cfg['best_point'] is False
+      and [cfg[k] for k in hm.TUNING_KEYS] == [None] * 5, 'quality max -> balance 75, numbers dropped')
+check(not set(('quality', 'smooth', 'refresh_period')) & (set(cfg) | set(saved()))
+      and saved()['balance'] == 75, 'settings that are gone leave the file')
+with open(CONFIG, 'w') as f:
+    json.dump({'balance': 40, 'updates_per_sec': 9}, f)
+cfg = hm._load_config(ROOT)
+check(cfg['balance'] == 40 and cfg['updates_per_sec'] == 9, 'numbers next to a balance are kept')
 hm.fini()
 check(not ROOTS and not STATE.callbacks, 'fini cleans up')
 shutil.rmtree(TEMP, ignore_errors=True)
