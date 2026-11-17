@@ -39,8 +39,12 @@ In battle the game shows the cursor while Ctrl is held, and the map stays on the
 while the panel is open, so a change is seen at once. The captions use the bitmap font packed with
 the mod (FONT_PATHS); if it cannot be read, the panel is drawn with no text.
 Every change is stored in mods/configs/heatmap/heatmap.json, which can also be edited by hand.
-Known limits of this first version: the map shows through cover (rays test the target only), and
-the shot is a straight line from the gun (no ballistic drop).
+Cover: with `hide_covered` on, every cell on the armor gets one more ray, from the camera to
+that point through the static scene (BigWorld.collideSegment, the test the game's magnetic aim
+uses to tell whether a vehicle is seen). A cell whose ray meets the ground, a building or a rock
+is left empty, like a miss; `covered_alpha` above 0 draws it dimmed instead. Bushes do not stop
+the ray, other vehicles and wrecks are not tested.
+Known limit: the shot is a straight line from the gun (no ballistic drop).
 """
 import json
 import math
@@ -68,7 +72,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.3.1'
+__version__ = '0.4.0'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -90,6 +94,8 @@ DEFAULTS = {
     'margin': 0.10,           # yellow band: the armor is within this share of the penetration
     'smooth': False,          # blend the cells instead of drawing them as squares
     'show_allies': False,
+    'hide_covered': True,     # leave out the parts of the target behind terrain and buildings
+    'covered_alpha': 0.0,     # ... or draw them with this share of `alpha` (0: not at all)
     'modes': ['arcade', 'sniper', 'dualgun'],
     'colors': {
         'pen': '#00FF00',
@@ -124,6 +130,9 @@ MIN_SLICE = 0.0002        # seconds: a frame of a pass does at least this much
 LEGACY_RESOLUTION = {'grid_w': 48, 'grid_h': 32, 'min_cell_px': 4, 'slice_ms': 2.5}
 
 MISS, PEN, MARGINAL, NO_PEN, RICOCHET, NO_DAMAGE = range(6)
+COVERED = 8               # added to a cell's code: the same outcome, seen through cover
+COVER_GAP = 0.3           # meters before the armor the cover ray stops: tracks stand on the ground
+SCENE_FLAGS = 128         # the static scene as shells and the aim meet it (AimingSystems)
 COLOR_KEYS = (None, 'pen', 'marginal', 'no_pen', 'ricochet', 'no_damage')
 
 # the game's trace of a shot through a vehicle (_CrosshairShotResults._getAllCollisionDetails)
@@ -566,7 +575,7 @@ QUALITY_LABELS = {'low': u'низкое', 'medium': u'среднее', 'high': u
 LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
-PANEL_DEFAULTS = ('enabled', 'quality') + QUALITY_KEYS + ('alpha',
+PANEL_DEFAULTS = ('enabled', 'quality') + QUALITY_KEYS + ('alpha', 'hide_covered',
                   'show_allies', 'smooth')
 TRANSPARENCY_STEP = 5     # percent
 
@@ -686,7 +695,7 @@ def render_panel(cfg, res, font, measured=None):
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 8 + P_HINT_ROW * 2 + P_FOOTER
+    h = P_HEADER + 8 + ROW * 9 + P_HINT_ROW * 2 + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -797,6 +806,8 @@ def render_panel(cfg, res, font, measured=None):
         x = c.text(font, x + 27, mid(y, y + ROW), label, P_HINT) + 12
     y += ROW
 
+    toggle(y, 'hide_covered', u'Скрывать за укрытиями')
+    y += ROW
     toggle(y, 'show_allies', u'Показывать и на союзниках')
     y += ROW
     toggle(y, 'smooth', u'Сглаживать ячейки')
@@ -1108,6 +1119,7 @@ class Heatmap(object):
         self.use_game_rules = True
         self.errors = 0
         self.logged = set()
+        self.cover_failed = False     # the scene ray raised: no cover test for this battle
         self.passes = 0
         self.pass_start = 0.0     # BigWorld.time() the pass in progress began at
         self.progress = (0, 1, 0.0)   # of that pass: cells done, cells in all, seconds of work
@@ -1169,15 +1181,22 @@ class Heatmap(object):
     # ---- picture ----
 
     def _make_palette(self):
-        alpha = int(max(0.0, min(1.0, float(self.cfg['alpha']))) * 255)
+        """RGBA of every cell code; the codes from COVERED on are the dimmed ones."""
+        alpha = max(0.0, min(1.0, float(self.cfg['alpha']))) * 255
+        try:
+            dim = max(0.0, min(1.0, float(self.cfg['covered_alpha'])))
+        except (TypeError, ValueError):
+            dim = 0.0
         colors = self.cfg['colors']
         pal = []
-        for key in COLOR_KEYS:
-            if key is None:
-                pal.append(b'\x00\x00\x00\x00')
-            else:
-                r, g, b = _rgb(colors.get(key), _rgb(DEFAULTS['colors'][key], (255, 0, 255)))
-                pal.append(struct.pack('4B', r, g, b, alpha))
+        for share in (1.0, dim):
+            for key in COLOR_KEYS:
+                if key is None:
+                    pal.append(b'\x00\x00\x00\x00')
+                else:
+                    r, g, b = _rgb(colors.get(key), _rgb(DEFAULTS['colors'][key], (255, 0, 255)))
+                    pal.append(struct.pack('4B', r, g, b, int(alpha * share)))
+            pal.extend([b'\x00\x00\x00\x00'] * (COVERED - len(COLOR_KEYS)))
         return pal
 
     def _rows(self, codes, gw, gh):
@@ -1400,6 +1419,12 @@ class Heatmap(object):
         if he_result is not None:
             min_pp, max_pp = _CrosshairShotResults._computePiercingPowerRandomization(shell)
         collide = target.appearance.collisions.collideAllWorld
+        # cover: the camera's line to a point of the armor against the static scene, as it stood
+        # when the pass began (so no drift here: the scene does not move with the target)
+        cover = bool(self.cfg['hide_covered']) and not self.cover_failed
+        scene, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
+        covered_code = COVERED if self.palette[COVERED + PEN][3:] != b'\x00' else None
+        covered_cells = 0
         get_mat = target.getMatinfo
         mats = {}
         codes = bytearray(gw * gh)
@@ -1461,6 +1486,22 @@ class Heatmap(object):
                                     hits = shot_hits
                     if code is None:
                         code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
+                    if cover:
+                        seen = t0 + d0 - COVER_GAP    # meters from the camera
+                        if seen > 1.0:
+                            try:
+                                hidden = scene(space, V3(cx + dx, cy + dy, cz + dz),
+                                               V3(cx + dx * seen, cy + dy * seen, cz + dz * seen),
+                                               SCENE_FLAGS) is not None
+                            except Exception:
+                                # the engine call is not what the scripts suggest: do without
+                                cover = hidden = False
+                                self.cover_failed = True
+                                log('cover test failed, the map shows through cover',
+                                    traceback.format_exc())
+                            if hidden:
+                                covered_cells += 1
+                                code = MISS if covered_code is None else code | covered_code
                     codes[row + i] = code
                 if not (row + i) & 7 and clock() > self.deadline:
                     work += clock() - slice_start
@@ -1487,10 +1528,10 @@ class Heatmap(object):
             self.report = False
             self.panel.redraw()
         if self.cfg['debug'] or self.passes == 1:
-            log('pass %d: %s grid %dx%d, %d cells on armor, %s pen %.0f mm, %.1f ms of work in '
-                '%d frames: %.1f updates a second at %.1f ms per frame'
-                % ((self.passes, target.typeDescriptor.type.name, gw, gh, hit_cells, shell.kind,
-                    full_pp, work * 1000.0, frames) + self.measured))
+            log('pass %d: %s grid %dx%d, %d cells on armor, %d of them behind cover, %s pen '
+                '%.0f mm, %.1f ms of work in %d frames: %.1f updates a second at %.1f ms per frame'
+                % ((self.passes, target.typeDescriptor.type.name, gw, gh, hit_cells, covered_cells,
+                    shell.kind, full_pp, work * 1000.0, frames) + self.measured))
             if self.passes == 1:
                 log(self._resolution_text())
 
@@ -1667,6 +1708,7 @@ class Heatmap(object):
         self.cell_cost = self.frame_dt = self.last_frame = self.measured = None
         self.report = False
         self.logged.clear()
+        self.cover_failed = False
         if self.comp is not None:
             try:
                 GUI.delRoot(self.comp)

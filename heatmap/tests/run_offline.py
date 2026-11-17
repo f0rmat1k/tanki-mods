@@ -265,6 +265,8 @@ class Vehicle(object):
 # ---- game modules ----
 
 class PlayerAvatar(object):
+    spaceID = 77
+
     def __init__(self):
         self.isVehicleAlive = True
         self.team = 1
@@ -311,7 +313,24 @@ def frames(n, dt=0.01, each=None):
 
 
 HELD = set()
+# a building: every point of the scene with x below WALL['x'] between z 10 and 14, if set
+WALL = {'x': None, 'calls': 0, 'broken': False}
+
+
+def collide_segment(space, a, b, flags):
+    assert space == 77 and flags == 128
+    WALL['calls'] += 1
+    if WALL['broken']:
+        raise TypeError('collideSegment() takes other arguments')
+    if WALL['x'] is None or (a.z - 12.0) * (b.z - 12.0) > 0:
+        return None
+    k = (12.0 - a.z) / (b.z - a.z)
+    x, y = a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k
+    return Obj(closestPoint=Vector3(x, y, 12.0)) if x < WALL['x'] and y < 8.0 else None
+
+
 module('BigWorld', player=lambda: STATE.player, target=lambda: STATE.target,
+       collideSegment=collide_segment,
        isKeyDown=lambda key: key in HELD,
        time=lambda: STATE.time, callback=callback, cancelCallback=cancel_callback,
        camera=lambda: Obj(invViewMatrix=STATE.cam),
@@ -782,6 +801,48 @@ panel_png('panel_rate.png')
 check(click(('quality', 'ultra')) is True and g.res == ('ultra', 128, 96, 1.0, 5.0, 10.0)
       and saved()['updates_per_sec'] is None, 'a quality chip puts its own numbers back')
 check(click(('toggle', 'show_allies')) is True and g.cfg['show_allies'] is True, 'allies toggle')
+
+# cover: a wall hides the left part of the target (the panel is still open, the map is held)
+check(click(('quality', 'high')) is True, 'high for the cover checks')
+del PUBLISHED[:]
+frames(600)
+open_codes, gw, gh = PUBLISHED[-1][:3]
+check(WALL['calls'] > 500 and not any(ord(c) & 8 for c in open_codes), 'cover rays cast, nothing hidden')
+WALL['x'] = 0.9
+g.last_key = None
+frames(600)
+codes = PUBLISHED[-1][0]
+gone = [i for i in range(len(codes)) if open_codes[i] != '\x00' and codes[i] == '\x00']
+kept = [i for i in range(len(codes)) if codes[i] != '\x00']
+print('     wall: %d cells hidden, %d left' % (len(gone), len(kept)))
+check(len(gone) > 100 and len(kept) > 100 and all(codes[i] == open_codes[i] for i in kept),
+      'the part behind the wall is left out, the rest is unchanged')
+check(max(i % gw for i in gone) < min(i % gw for i in kept if i // gw > gh // 2),
+      'the hidden part is the one on the wall side')
+shutil.copy(os.path.join(CACHE, g.files[-1]), os.path.join(OUT, 'cover.png'))
+g.cfg['covered_alpha'] = 0.2
+g.apply_settings({})
+frames(600)
+codes = PUBLISHED[-1][0]
+dimmed = [i for i in gone if ord(codes[i]) == ord(open_codes[i]) | 8]
+alphas = set(ord(row[i]) for row in g.pic_sig[2] for i in range(3, len(row), 4))
+check(len(dimmed) == len(gone) and len(alphas) == 3 and 0 < sorted(alphas)[1] < 40,
+      'covered_alpha draws the hidden part dimmed instead (alphas %r)' % sorted(alphas))
+shutil.copy(os.path.join(CACHE, g.files[-1]), os.path.join(OUT, 'cover_dim.png'))
+g.cfg['covered_alpha'] = 0.0
+calls = WALL['calls']
+check(click(('toggle', 'hide_covered')) is True and g.cfg['hide_covered'] is False
+      and saved()['hide_covered'] is False, 'cover toggle in the panel')
+frames(600)
+check(PUBLISHED[-1][0] == open_codes and WALL['calls'] == calls, 'off: the map shows through the wall')
+check(click(('toggle', 'hide_covered')) is True and g.cfg['hide_covered'] is True, 'cover on again')
+WALL['broken'] = True
+frames(600)
+check(g.cover_failed and PUBLISHED[-1][0] == open_codes and g.tick_cb is not None and g.use_game_rules,
+      'a failing scene ray only turns the cover test off')
+WALL['broken'], WALL['x'] = False, None
+g.cover_failed = False
+panel_png('panel_cover.png')
 n_roots = len(ROOTS)
 check(click(('toggle', 'smooth')) is True and g.cfg['smooth'] is True, 'smooth toggle')
 frames(1500)
