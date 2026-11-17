@@ -50,10 +50,18 @@ that point through the static scene (BigWorld.collideSegment, the test the game'
 uses to tell whether a vehicle is seen). A cell whose ray meets the ground, a building or a rock
 is left empty, like a miss; `covered_alpha` above 0 draws it dimmed instead. Bushes do not stop
 the ray, other vehicles and wrecks are not tested.
+Best point: with `best_point` on, a mark shows where to aim. Every pass ends with a look for
+the cell around which the aim circle (gunRotator.dispersionAngle at the distance to the target)
+holds the most penetrating cells, counted with more weight near the middle, as the shots fall;
+close calls count half, and cells left out as covered do not count, like the misses beside the
+vehicle. The mark is a picture of its own over the map, so it is as sharp on a coarse fast map
+as on a fine one; it stays put while its place is nearly as good as the best one, and is found
+again without a new pass when the aim circle grows or shrinks.
 Known limit: the shot is a straight line from the gun (no ballistic drop).
 """
 import json
 import math
+import operator
 import os
 import struct
 import time
@@ -78,7 +86,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.5.0'
+__version__ = '0.5.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -102,6 +110,7 @@ DEFAULTS = {
     'show_allies': False,
     'hide_covered': True,     # leave out the parts of the target behind terrain and buildings
     'covered_alpha': 0.0,     # ... or draw them with this share of `alpha` (0: not at all)
+    'best_point': True,       # mark the place to aim at: the most penetrations in the aim circle
     'modes': ['arcade', 'sniper', 'dualgun'],
     'colors': {
         'pen': '#00FF00',
@@ -609,6 +618,109 @@ def box_drifted(a, b):
     return shift > (REFRESH_SHIFT_CUT if cut else REFRESH_SHIFT)
 
 
+# ---- the best point to aim at ----
+
+MARK_SIZE = 33            # pixels: the mark is a ring with a dot and four ticks
+MARK_Z = 0.99             # in front of the map (smaller z draws on top)
+MAX_BLUR = 12             # cells: the widest box the aim circle is spread with
+MARK_KEEP = 0.92          # the mark stays where it is while that place scores this share of the best
+MARK_PLATEAU = 0.97       # places within this share of the best count as equally good
+MARK_REDO = 1.25          # the aim circle grew or shrank by this factor: find the mark again
+# cell code -> its worth as a hit; PEN and MARGINAL cells as places the mark may stand on
+_WEIGHTS = b''.join([chr(2 if c == PEN else 1 if c == MARGINAL else 0) for c in xrange(256)])
+_IS_PEN = b''.join([chr(1 if c == PEN else 0) for c in xrange(256)])
+_IS_MARGINAL = b''.join([chr(1 if c == MARGINAL else 0) for c in xrange(256)])
+
+
+def _sum_rows(rows, h):
+    """Every row summed with its h neighbours above and below (fewer at the edges). The work
+    is done by map() over whole rows, so a big grid takes milliseconds."""
+    n = len(rows)
+    prefix = [[0] * len(rows[0])]
+    for row in rows:
+        prefix.append(map(operator.add, prefix[-1], row))
+    return [map(operator.sub, prefix[min(n, j + h + 1)], prefix[max(0, j - h)])
+            for j in xrange(n)]
+
+
+def find_best(codes, gw, gh, radius, keep, out):
+    """The cell to aim at in a grid of cell codes, for an aim circle of `radius` cells: where
+    the shots, falling thicker near the middle of the circle, penetrate most often.
+
+    A generator: it yields between its steps, so that the caller can spread them over frames,
+    and appends the answer to `out`: (column, row, kept), or None if nothing can be pierced.
+    keep: the (column, row) of the mark on screen, which stays if nearly as good (kept = True).
+
+    The circle is three box blurs of a third of its radius each, close to a bell curve.
+    The mark stands on a penetrating cell (on a close call only if there is no better kind).
+    Among places that are equally good, as inside a large green field, the one deepest in the
+    green wins: the same sum over a wider circle decides, and after it the nearness to the
+    middle of everything that can be pierced (an aim circle wider than the vehicle).
+    """
+    data = bytes(codes)
+    weights = bytearray(data.translate(_WEIGHTS))
+    if not any(weights):
+        out.append(None)
+        return
+    allowed = bytearray(data.translate(_IS_PEN if chr(PEN) in data else _IS_MARGINAL))
+    rows = [list(weights[j * gw:(j + 1) * gw]) for j in xrange(gh)]
+    across, down = map(sum, zip(*rows)), map(sum, rows)
+    total = float(sum(down))
+    mid_i = sum(i * v for i, v in enumerate(across)) / total
+    mid_j = sum(j * v for j, v in enumerate(down)) / total
+    h = min(MAX_BLUR, max(1, int(round(radius / 3.0))))
+    for _ in xrange(3):
+        rows = _sum_rows(rows, h)
+        yield
+        rows = zip(*_sum_rows(zip(*rows), h))
+        yield
+    score = [map(operator.mul, row, allowed[j * gw:(j + 1) * gw]) for j, row in enumerate(rows)]
+    best = max(map(max, score))
+    if keep is not None:
+        i, j = keep
+        if 0 <= i < gw and 0 <= j < gh and score[j][i] >= MARK_KEEP * best:
+            out.append((i, j, True))
+            return
+    floor = best * MARK_PLATEAU
+    places = [(j, i) for j, row in enumerate(score) if max(row) >= floor
+              for i, v in enumerate(row) if v >= floor]
+    if len(places) > 1:
+        yield
+        wide = _sum_rows(rows, 2 * h + 1)
+        yield
+        wide = zip(*_sum_rows(zip(*wide), 2 * h + 1))
+        j, i = max(places, key=lambda p: (wide[p[0]][p[1]],
+                                          -(p[0] - mid_j) ** 2 - (p[1] - mid_i) ** 2))
+    else:
+        j, i = places[0]
+    out.append((i, j, False))
+
+
+def mark_png():
+    """The mark as a PNG: a white ring with a dot and four ticks, edged dark to show on any
+    color of the map."""
+    size, c = MARK_SIZE, MARK_SIZE // 2
+
+    def white(x, y):
+        dx, dy = abs(x - c), abs(y - c)
+        d = math.sqrt(dx * dx + dy * dy)
+        return (6.5 <= d <= 8.5 or d <= 1.5
+                or (dx <= 0.5 and 10.0 <= dy <= 15.0) or (dy <= 0.5 and 10.0 <= dx <= 15.0))
+
+    rows = []
+    for y in xrange(size):
+        row = []
+        for x in xrange(size):
+            if white(x, y):
+                row.append(b'\xff\xff\xff\xff')
+            elif any(white(x + ox, y + oy) for ox in (-1, 0, 1) for oy in (-1, 0, 1)):
+                row.append(b'\x00\x00\x00\xc8')
+            else:
+                row.append(b'\x00\x00\x00\x00')
+        rows.append(b''.join(row))
+    return png_rgba(size, size, rows)
+
+
 def _pose(matrix):
     p = matrix.translation
     return p.x, p.y, p.z, matrix.yaw, matrix.pitch, matrix.roll
@@ -641,7 +753,7 @@ QUALITY_LABELS = {'low': u'низкое', 'medium': u'среднее', 'high': u
 LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
-PANEL_DEFAULTS = ('enabled', 'quality') + QUALITY_KEYS + ('alpha', 'hide_covered',
+PANEL_DEFAULTS = ('enabled', 'quality') + QUALITY_KEYS + ('alpha', 'hide_covered', 'best_point',
                   'show_allies')
 TRANSPARENCY_STEP = 5     # percent
 
@@ -762,7 +874,7 @@ def render_panel(cfg, res, font, measured=None):
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 8 + P_HINT_ROW * 2 + P_FOOTER
+    h = P_HEADER + 8 + ROW * 9 + P_HINT_ROW * 2 + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -873,6 +985,8 @@ def render_panel(cfg, res, font, measured=None):
     y += ROW
 
     toggle(y, 'hide_covered', u'Скрывать за укрытиями')
+    y += ROW
+    toggle(y, 'best_point', u'Показывать лучшую точку')
     y += ROW
     toggle(y, 'show_allies', u'Показывать и на союзниках')
     y += ROW
@@ -1176,9 +1290,16 @@ class Heatmap(object):
         self.deadline = 0.0       # time.clock() at which the pass yields the frame
         self.next_pass = 0.0
         self.last_key = None      # (scene, full grid?) of the last finished pass
+        self.mark_comp = None     # the picture of the mark
+        self.mark_uv = None       # where the mark is in the target's box: shares of it, from
+                                  # the left and from the top
+        self.mark_disp = 0.0      # the dispersion angle the mark was found for
+        self.grid = None          # the grid on screen, for finding the mark again: (codes,
+                                  # gw, gh, left, top, cw, ch, box, cells per unit of dispersion)
         self.job_scene = None     # the scene the pass in progress was begun for
         self.job_fine = False     # ... and whether it is a fine pass
-        self.pic = None           # (target id, (left, top, w, h) in clip coords, target box then)
+        self.pic = None           # (target id, (left, top, w, h) in clip coords, target box
+                                  # then, the mark's place in clip coords then or None)
         self.pic_sig = None       # (w, h, rows) of the picture in the texture
         self.cur_box = None
         self.palette = self._make_palette()
@@ -1292,8 +1413,9 @@ class Heatmap(object):
         GUI.addRoot(c)
         return c
 
-    def _publish(self, target, codes, gw, gh, rect, box):
-        """Show a finished grid; rect is its place in clip coordinates when the pass began."""
+    def _publish(self, target, codes, gw, gh, rect, box, mark=None):
+        """Show a finished grid; rect is its place in clip coordinates when the pass began,
+        mark the point to aim at, in the same coordinates."""
         if not any(codes):
             self.pic = None
             self._hide()
@@ -1303,7 +1425,7 @@ class Heatmap(object):
         if sig != self.pic_sig or self.comp is None:
             self._component(self._write_png(png_rgba(gw, gh, rows)))
             self.pic_sig = sig
-        self.pic = (target.id, rect, box)
+        self.pic = (target.id, rect, box, mark)
         self._place(self.cur_box or box)
 
     def _place(self, box):
@@ -1311,7 +1433,7 @@ class Heatmap(object):
         c = self.comp
         if c is None or self.pic is None:
             return
-        _, (left, top, w, h), then = self.pic
+        _, (left, top, w, h), then, mark = self.pic
         tw, th = then[2] - then[0], then[3] - then[1]
         if tw <= 0.0 or th <= 0.0:
             return
@@ -1322,10 +1444,49 @@ class Heatmap(object):
         c.position = (x, y, 1.0)
         c.width, c.height = w * kx * 0.5 * sw, h * ky * 0.5 * sh
         c.visible = True
+        if mark is None:
+            self._hide_mark()
+        else:
+            m = self._mark_component()
+            # the picture hangs by its top left corner: half its size back from the point
+            m.position = (box[0] + (mark[0] - then[0]) * kx - MARK_SIZE / sw,
+                          box[3] + (mark[1] - then[3]) * ky + MARK_SIZE / sh, MARK_Z)
+            m.visible = True
+
+    def _mark_component(self):
+        m = self.mark_comp
+        if m is None:
+            name = 'hm_mark_%d.png' % os.getpid()
+            with open(os.path.join(self.cache_dir, name), 'wb') as f:
+                f.write(mark_png())
+            try:
+                ResMgr.purge(self.cache_vfs, True)
+            except Exception:
+                pass
+            S = GUI.Simple
+            m = self.mark_comp = S('%s/%s' % (self.cache_vfs, name))
+            m.materialFX = S.eMaterialFX.BLEND
+            m.widthMode = m.heightMode = S.eSizeMode.PIXEL
+            m.horizontalPositionMode = m.verticalPositionMode = S.ePositionMode.CLIP
+            m.horizontalAnchor = S.eHAnchor.LEFT
+            m.verticalAnchor = S.eVAnchor.TOP
+            m.width = m.height = MARK_SIZE
+            m.visible = False
+            GUI.addRoot(m)
+            try:
+                GUI.reSort()
+            except Exception:
+                pass
+        return m
+
+    def _hide_mark(self):
+        if self.mark_comp is not None:
+            self.mark_comp.visible = False
 
     def _hide(self):
         if self.comp is not None:
             self.comp.visible = False
+        self._hide_mark()
 
     def _drop(self):
         """No target: nothing on screen, no pass running."""
@@ -1333,6 +1494,7 @@ class Heatmap(object):
         self.job = None
         self.pic = None
         self.last_key = None
+        self.grid = self.mark_uv = None
         self._hide()
 
     # ---- target ----
@@ -1479,9 +1641,60 @@ class Heatmap(object):
         cam_dist = math.sqrt((cx - view.pos[0]) ** 2 + (cy - view.pos[1]) ** 2
                              + (cz - view.pos[2]) ** 2)
         span = (max(view.near, cam_dist - radius - 0.5), cam_dist + radius + 0.5)
+        aim = None
+        if self.cfg['best_point']:
+            # the aim circle on the target, in cells: its radius is the dispersion angle times
+            # the distance (VehicleGunRotator), seen from the camera
+            disp = self._dispersion(player)
+            per_disp = distance / (cam_dist * view.tan_y) * 0.5 * sh / cell
+            aim = (disp, per_disp, self._mark_cell(box, (left, top, cw, ch)))
         self.job_scene, self.job_fine = scene, fine
         self.job = self._pass(target, view, (gw, gh, left, top, cw, ch), span, box, rules,
-                              full_pp, gun, (scene, full), he_result)
+                              full_pp, gun, (scene, full), he_result, aim)
+
+    @staticmethod
+    def _dispersion(player):
+        """The aim circle now, as its radius over the distance (0 if it cannot be read)."""
+        try:
+            return float(player.gunRotator.dispersionAngle)
+        except Exception:
+            return 0.0
+
+    def _mark_cell(self, box, grid):
+        """The cell of a grid laid over `box` that the mark on screen is in, or None."""
+        if self.mark_uv is None:
+            return None
+        left, top, cw, ch = grid
+        x = box[0] + self.mark_uv[0] * (box[2] - box[0])
+        y = box[3] - self.mark_uv[1] * (box[3] - box[1])
+        return int(math.floor((x - left) / cw)), int(math.floor((top - y) / ch))
+
+    def _marked(self, found, box, grid):
+        """The mark's place in clip coordinates for find_best's answer, remembered as a place
+        in the target's box. A mark that was kept does not jump to the middle of its cell."""
+        if found is None:
+            self.mark_uv = None
+            return None
+        left, top, cw, ch = grid
+        w, h = box[2] - box[0], box[3] - box[1]
+        if not found[2] or self.mark_uv is None:
+            x, y = left + (found[0] + 0.5) * cw, top - (found[1] + 0.5) * ch
+            self.mark_uv = ((x - box[0]) / w, (box[3] - y) / h)
+        return box[0] + self.mark_uv[0] * w, box[3] - self.mark_uv[1] * h
+
+    def _remark(self, target, disp):
+        """Find the mark again for the grid on screen: the aim circle changed, the armor did
+        not. A job like a pass, a step per frame at most."""
+        codes, gw, gh, left, top, cw, ch, box, per_disp = self.grid
+        grid = (left, top, cw, ch)
+        found = []
+        for _ in find_best(codes, gw, gh, disp * per_disp, self._mark_cell(box, grid), found):
+            if time.clock() > self.deadline:
+                yield
+        self.mark_disp = disp
+        if self.pic is not None and self.pic[0] == target.id and self.pic[2] is box:
+            self.pic = self.pic[:3] + (self._marked(found[0], box, grid),)
+            self._place(self.cur_box or box)
 
     def _no_map(self, kind):
         """Shells the map is not drawn for: say so once and look again in a while."""
@@ -1492,9 +1705,10 @@ class Heatmap(object):
             self.logged.add(kind)
             log('no heatmap for %s shells' % kind)
 
-    def _pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result):
+    def _pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result, aim):
         """Cast the grid, a slice per frame (yields when self.deadline passes), then publish.
-        done: (scene, full grid?), what self.last_key becomes when the pass ends."""
+        done: (scene, full grid?), what self.last_key becomes when the pass ends;
+        aim: (dispersion, cells per unit of it, the cell of the mark on screen) or None."""
         gw, gh, left, top, cw, ch = grid
         t0, t1 = span
         cx, cy, cz = view.pos
@@ -1606,13 +1820,29 @@ class Heatmap(object):
                     else:
                         drift = None
 
-        self._publish(target, codes, gw, gh, (left, top, gw * cw, gh * ch), box)
+        work += clock() - slice_start
+        slice_start = clock()
+        cast = work             # the rays alone: what a cell costs
+        mark = None
+        self.grid = None
+        if aim is not None:
+            found = []
+            for _ in find_best(codes, gw, gh, aim[0] * aim[1], aim[2], found):
+                if clock() > self.deadline:
+                    work += clock() - slice_start
+                    yield
+                    slice_start = clock()
+                    frames += 1
+            mark = self._marked(found[0], box, (left, top, cw, ch))
+            self.mark_disp = aim[0]
+            self.grid = (codes, gw, gh, left, top, cw, ch, box, aim[1])
+        self._publish(target, codes, gw, gh, (left, top, gw * cw, gh * ch), box, mark)
         self.last_key = done
         self.passes += 1
         work += clock() - slice_start
         # the cost of a cell on this computer, for sizing the fast passes: follow it, but do
         # not let one odd pass throw it far
-        sample = work / (gw * gh)
+        sample = cast / (gw * gh)
         if 0.5 < sample / self.cost < 2.0:
             self.cost = self.cost * 0.7 + sample * 0.3
         else:
@@ -1690,6 +1920,12 @@ class Heatmap(object):
                 fine = None             # the full map on screen still holds
             if fine is None:
                 self.next_pass = now + STILL_CHECK_PERIOD
+                if self.grid is not None and self.mark_disp > 0.0:
+                    # the armor is the same, the aim circle may not be: the mark alone again
+                    disp = self._dispersion(player)
+                    if not 1.0 / MARK_REDO < disp / self.mark_disp < MARK_REDO:
+                        self.job_scene, self.job_fine = scene, False
+                        self.job = self._remark(target, disp)
             else:
                 self.next_pass = now + 1.0 / self.res[5]
                 self.pass_start = now
@@ -1743,10 +1979,16 @@ class Heatmap(object):
         _save_config(self.root, cfg)
         self.res = resolution(cfg)
         self.palette = self._make_palette()
-        # what is on screen was drawn with the old settings
+        # what is on screen, and a pass under way, were made with the old settings
+        self.job = None
         self.last_key = self.pic_sig = None
         self.next_pass = 0.0
         self.report = 2     # the fast pass and the fine one after it
+        if not cfg['best_point']:
+            self.grid = self.mark_uv = None
+            if self.pic is not None:
+                self.pic = self.pic[:3] + (None,)
+            self._hide_mark()
         if not cfg['enabled']:
             self._drop()
         elif self.in_battle and self.tick_cb is None:
@@ -1824,12 +2066,15 @@ class Heatmap(object):
         self.report = 0
         self.logged.clear()
         self.cover_failed = False
-        if self.comp is not None:
-            try:
-                GUI.delRoot(self.comp)
-            except Exception:
-                pass
-            self.comp = None
+        self.grid = self.mark_uv = None
+        for name in ('comp', 'mark_comp'):
+            comp = getattr(self, name)
+            if comp is not None:
+                try:
+                    GUI.delRoot(comp)
+                except Exception:
+                    pass
+                setattr(self, name, None)
         try:
             self._clean_cache()
         except Exception:

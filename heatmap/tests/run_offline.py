@@ -24,10 +24,11 @@ os.makedirs(CACHE)
 os.makedirs(os.path.join(ROOT, 'mods', 'configs', 'heatmap'))
 CONFIG = os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.json')
 # the file 0.1.0 wrote: its fixed resolution must not pin the new default quality (and what a
-# cell costs in this test, where the collisions are Python: ten times the game's)
+# cell costs in this test, where the collisions are Python: ten times the game's; the mark of
+# the best point is off until its own checks, the ones before count the pictures on screen)
 with open(CONFIG, 'w') as f:
     f.write('{"alpha": 0.5, "enabled": true, "grid_h": 32, "grid_w": 48, "hold": 1.0, '
-            '"min_cell_px": 4, "slice_ms": 2.5, "margin": 0.1, "_cell_cost_us": 150}')
+            '"min_cell_px": 4, "slice_ms": 2.5, "margin": 0.1, "_cell_cost_us": 150, "best_point": false}')
 os.chdir(ROOT)
 
 
@@ -278,7 +279,8 @@ class PlayerAvatar(object):
                          piercingPowerRandomization=0.25)
         self.shot = Obj(piercingPower=(175.0, 160.0), maxDistance=720.0, shell=self.shell)
         self.own = Vector3(0.0, 0.0, 0.0)
-        self.gunRotator = Obj(getCurShotPosition=lambda: (Vector3(0.0, 2.2, 1.0), Vector3(0, 0, 1)))
+        self.gunRotator = Obj(getCurShotPosition=lambda: (Vector3(0.0, 2.2, 1.0), Vector3(0, 0, 1)),
+                              dispersionAngle=0.004)
 
     def getVehicleDescriptor(self):
         return Obj(shot=self.shot)
@@ -512,12 +514,12 @@ check(saved['quality'] == 'high' and saved['grid_w'] is None and saved['slice_ms
 orig_publish = g._publish
 
 
-def publish(target, codes, gw, gh, rect, box):
+def publish(target, codes, gw, gh, rect, box, mark=None):
     entry = (bytes(codes), gw, gh, rect, box)
     PUBLISHED.append(entry)
     ALL.append(entry)
     FINE[id(entry)] = bool(g.job_fine)
-    orig_publish(target, codes, gw, gh, rect, box)
+    orig_publish(target, codes, gw, gh, rect, box, mark)
 
 
 ALL, FINE = [], {}     # every pass published, and whether it was a fine one
@@ -923,8 +925,66 @@ check(g.cover_failed and PUBLISHED[-1][0] == open_codes and g.tick_cb is not Non
 WALL['broken'], WALL['x'] = False, None
 g.cover_failed = False
 panel_png('panel_cover.png')
+
+# the best point: a mark where the aim circle holds the most penetrations
+check(click(('toggle', 'best_point')) is True and g.cfg['best_point'] is True
+      and saved()['best_point'] is True, 'best point toggle in the panel')
 frames(600)
-maps = [r for r in ROOTS if r is not g.panel.comp]
+marks = [r for r in ROOTS if r is not g.panel.comp and r is not comp]
+check(len(marks) == 1 and marks[0].visible, 'the mark is on screen')
+mark = marks[0]
+
+
+def mark_cell():
+    """The cell of the last published grid the middle of the mark is over."""
+    gw, gh, rect = PUBLISHED[-1][1:4]
+    x, y = mark.position[0] + 33 / 1920.0, mark.position[1] - 33 / 1080.0
+    return int((x - rect[0]) / (rect[2] / gw)), int((rect[1] - y) / (rect[3] / gh))
+
+
+codes, gw, gh = PUBLISHED[-1][:3]
+i, j = mark_cell()
+around = [codes[(j + dj) * gw + i + di] for dj in (-2, -1, 0, 1, 2) for di in (-2, -1, 0, 1, 2)]
+print('     mark at cell %d, %d of %dx%d' % (i, j, gw, gh))
+check(set(around) == set([chr(hm.PEN)]), 'the mark is well inside the green')
+before = mark.position
+STATE.cam = look_at((0.0, 6.0, -12.0), (2.0, 1.5, 22.0))
+frames(1)
+check(mark.position != before, 'the mark follows the target on the screen')
+STATE.cam = look_at((0.0, 6.0, -12.0), (2.5, 1.5, 22.0))
+frames(300)
+check(mark.position == before, 'and comes back with it')
+# a wall over the place of the mark: it moves to the best of what is still seen
+for wall in (0.9, 1.5, 2.2, 3.0, 3.8):
+    WALL['x'] = wall
+    g.last_key = None
+    frames(600)
+    if PUBLISHED[-1][0][j * gw + i] == '\x00':
+        break
+codes = PUBLISHED[-1][0]
+check(codes[j * gw + i] == '\x00', 'a wall at x %.1f hides the place of the mark' % WALL['x'])
+i2, j2 = mark_cell()
+check(mark.visible and codes[j2 * gw + i2] == chr(hm.PEN) and (i2, j2) != (i, j),
+      'the mark moved to a visible penetrating cell (%d, %d)' % (i2, j2))
+WALL['x'] = None
+g.last_key = None
+frames(600)
+# the aim circle grows: the mark is found again, the map is not cast again
+n = len(PUBLISHED)
+STATE.player.gunRotator.dispersionAngle = 0.03
+frames(30)
+check(g.mark_disp == 0.03 and len(PUBLISHED) == n and g.job is None and mark.visible,
+      'the aim circle grew: the mark is found again without a pass')
+i3, j3 = mark_cell()
+check(PUBLISHED[-1][0][j3 * gw + i3] == chr(hm.PEN), 'and stands on a penetrating cell')
+STATE.player.gunRotator.dispersionAngle = 0.004
+frames(30)
+check(click(('toggle', 'best_point')) is True and not g.cfg['best_point'] and not mark.visible,
+      'best point off: no mark')
+frames(600)
+check(not mark.visible, 'and none after the next pass')
+frames(600)
+maps = [r for r in ROOTS if r is not g.panel.comp and r is not g.mark_comp]
 check(len(maps) == 1 and maps[0] is comp and comp.filterType == 'POINT'
       and not [a for r, a in g.panel.hits if a == ('toggle', 'smooth')], 'no smoothing option')
 check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp.visible,
@@ -934,6 +994,8 @@ check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
       and g.res == ('high', 80, 60, 2.0, 4.0, 12.0) and g.cfg['hide_covered'] and not g.cfg['show_allies'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
+check(g.cfg['best_point'] is True, 'the defaults turn the best point on')
+g.apply_settings({'best_point': False})     # the checks below count the pictures on screen
 CURSOR.position = (-0.9, 0.9)
 STATE.time += 0.01
 check(game.handleKeyEvent(KeyEvent(256)) is False, 'a click beside the panel passes through')
@@ -980,6 +1042,39 @@ check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel without
 check(click(('quality', 'high')) is True and g.res[0] == 'high', 'and it works')
 panel_png('panel_nofont.png')
 game.handleKeyEvent(KeyEvent(1))
+# find_best on drawn grids: G pierced, y close call, r not pierced, . beside the vehicle
+def best(rows, radius, keep=None):
+    text = ''.join(rows)
+    for char, code in (('.', hm.MISS), ('G', hm.PEN), ('y', hm.MARGINAL), ('r', hm.NO_PEN)):
+        text = text.replace(char, chr(code))
+    out = []
+    for _ in hm.find_best(bytearray(text), len(rows[0]), len(rows), radius, keep, out):
+        pass
+    return out[0]
+
+
+FIELD = ['....................',
+         '.GGGGGGGGGrrrrrrGG..',
+         '.GGGGGGGGGrrrrrrGG..',
+         '.GGGGGGGGGrrrrrrrr..',
+         '.GGGGGGGGGrrrryyyy..',
+         '.GGGGGGGGGrrrrrrrr..',
+         '.GGGGGGGGGrrGrrrrr..',
+         '.GGGGGGGGGrrrrrrrr..',
+         '....................']
+check(best(FIELD, 3.0) == (5, 4, False), 'the middle of the big green field %r' % (best(FIELD, 3.0),))
+check(best(FIELD, 0.2) == (5, 4, False), 'also for a pin-sharp gun: deepest in the green')
+# a circle wider than the vehicle: the green cell nearest to the middle of all the green
+huge = best(FIELD, 30.0)
+check(5 <= huge[0] <= 9 and 3 <= huge[1] <= 5, 'a huge aim circle leans to the rest of the green %r' % (huge,))
+check(best(FIELD, 3.0, keep=(4, 3)) == (4, 3, True), 'a mark nearly as good stays where it is')
+check(best(FIELD, 3.0, keep=(1, 1)) == (5, 4, False), 'a mark at the edge moves to the middle')
+check(best(FIELD, 3.0, keep=(12, 3)) == (5, 4, False), 'a mark on red moves')
+check(best([r.replace('G', 'r') for r in FIELD], 3.0)[:2] in ((15, 4), (16, 4)),
+      'no green at all: the middle of the close calls')
+check(best(['....', '.rr.', '....'], 3.0) is None, 'nothing to pierce: no mark')
+check(best(['G'], 5.0) == (0, 0, False), 'a grid of one cell')
+
 # settings files written before 0.3.1 gave the pause between passes in seconds
 for period, want in ((0.25, 4), (0.12, None)):
     with open(CONFIG, 'w') as f:
