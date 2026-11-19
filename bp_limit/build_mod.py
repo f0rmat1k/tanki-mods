@@ -18,10 +18,6 @@ PY27 = r'C:\Python27\python.exe'
 GAME = r'G:\Tanki'
 MOD_ID = 'bp_limit'
 SOURCES = ['mod_bp_limit.py']
-# the shared overlay_label module is compiled under a mod-specific name so two
-# mods never load different versions of the same module
-LABEL_SRC = os.path.join(HERE, '..', 'common', 'overlay_label.py')
-LABEL_NAME = 'bp_limit_label.py'
 
 META = """<root>
 \t<id>%s</id>
@@ -75,38 +71,21 @@ def build():
     pyc_dir = os.path.join(out_dir, 'pyc')
     os.makedirs(pyc_dir, exist_ok=True)
     target = os.path.join(out_dir, '%s_%s.mtmod' % (MOD_ID, version))
-    # bake the bitmap font (the same one penmap, heatmap, shell_cost etc. use)
-    font = os.path.join(out_dir, 'font.bin')
-    subprocess.check_call([sys.executable, os.path.join(HERE, '..', 'penmap', 'make_font.py'),
-                           '--out', font])
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_STORED) as z:
         zip_entry(z, 'meta.xml', META % (
             MOD_ID, version, 'Battle Pass limit',
-            'Shows Battle Pass points earned / cap / remaining for the selected vehicle'))
-        # the mod itself
+            'Shows Battle Pass points earned / cap / remaining in vehicle tooltips'))
         for name in SOURCES:
             pyc = os.path.join(pyc_dir, name + 'c')
             compile27(os.path.join(HERE, 'mod', name), pyc, 'scripts/client/gui/mods/' + name)
             with open(pyc, 'rb') as f:
                 zip_entry(z, 'res/scripts/client/gui/mods/' + name + 'c', f.read())
-        # the label module (overlay_label.py compiled as bp_limit_label.pyc)
-        label_pyc = os.path.join(pyc_dir, LABEL_NAME + 'c')
-        compile27(LABEL_SRC, label_pyc, 'scripts/client/gui/mods/' + LABEL_NAME)
-        with open(label_pyc, 'rb') as f:
-            zip_entry(z, 'res/scripts/client/gui/mods/' + LABEL_NAME + 'c', f.read())
-        # the bitmap font
-        with open(font, 'rb') as f:
-            zip_entry(z, 'res/mods/%s/font.bin' % MOD_ID, f.read())
     print('built %s (%d bytes)' % (target, os.path.getsize(target)))
     return target
 
 
 def install(target, game):
     mods, res_mods = game_paths(game)
-    # ensure the cache folder exists (required for GUI.Simple texture loading)
-    cache = os.path.join(res_mods, 'mods', MOD_ID + '_cache')
-    os.makedirs(cache, exist_ok=True)
-    print('cache folder %s' % cache)
     old = re.compile(r'^%s_\d[\w.]*\.mtmod$' % re.escape(MOD_ID))
     try:
         for f in os.listdir(mods):
@@ -122,7 +101,7 @@ def install(target, game):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--install', action='store_true',
-                    help='copy the package into the game and create its cache folder')
+                    help='copy the package into the game')
     ap.add_argument('--game', default=GAME, help='game folder (default %s)' % GAME)
     a = ap.parse_args()
     target = build()
