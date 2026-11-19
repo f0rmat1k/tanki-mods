@@ -18,6 +18,18 @@
       "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/auto_style-v0.3.5/auto_style_0.3.5.mtmod",
       "version": "0.3.5"
     },
+    "bp_limit": {
+      "description": "В ангаре показывает очки боевого пропуска для выбранного танка: набрано, лимит и сколько осталось",
+      "dirs": [
+        "res_mods/{client}/mods/bp_limit_cache"
+      ],
+      "file": "bp_limit_0.1.0.mtmod",
+      "name": "Лимит очков БП",
+      "sha256": "f46a948c91fb601ebc5b8aca98bb12a88a820c89ca8e5726ee61a29abb4101bd",
+      "size": 42596,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/bp_limit-v0.1.0/bp_limit_0.1.0.mtmod",
+      "version": "0.1.0"
+    },
     "camera_zoom": {
       "description": "Камеру от третьего лица можно отодвинуть до 50 м вместо 25",
       "dirs": [],
