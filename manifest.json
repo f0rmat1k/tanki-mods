@@ -23,12 +23,12 @@
       "dirs": [
         "res_mods/{client}/mods/bp_limit_cache"
       ],
-      "file": "bp_limit_0.1.0.mtmod",
+      "file": "bp_limit_0.2.0.mtmod",
       "name": "Лимит очков БП",
-      "sha256": "f46a948c91fb601ebc5b8aca98bb12a88a820c89ca8e5726ee61a29abb4101bd",
-      "size": 42596,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/bp_limit-v0.1.0/bp_limit_0.1.0.mtmod",
-      "version": "0.1.0"
+      "sha256": "91530100d9eb5ff1c1e5de7e5148bbff85bb96d3e69ac8e53b149b7c1c5f98af",
+      "size": 5150,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/bp_limit-v0.2.0/bp_limit_0.2.0.mtmod",
+      "version": "0.2.0"
     },
     "camera_zoom": {
       "description": "Камеру от третьего лица можно отодвинуть до 50 м вместо 25",
