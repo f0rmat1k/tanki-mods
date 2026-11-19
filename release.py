@@ -89,6 +89,14 @@ MODS = {
                        u'со своим стилем или камуфляжем не трогаются',
         'dirs': [],
     },
+    'bp_limit': {
+        'version_file': 'bp_limit/mod/mod_bp_limit.py',
+        'built': 'bp_limit/build/bp_limit_{version}.mtmod',
+        'name': u'Лимит очков БП',
+        'description': u'В ангаре показывает очки боевого пропуска для выбранного танка: '
+                       u'набрано, лимит и сколько осталось',
+        'dirs': ['res_mods/{client}/mods/bp_limit_cache'],
+    },
 }
 # third-party mods: the launcher downloads their official archive, nothing is re-uploaded here
 EXTERNAL = {
