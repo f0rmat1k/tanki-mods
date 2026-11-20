@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.7.2'
+__version__ = '0.7.3'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -1575,6 +1575,16 @@ class SecondaryOverlay(object):
                     codes[row + i] = code
                 if not (row + i) & 7 and clock() > self.deadline:
                     yield
+                    # the target may have been destroyed while yielded
+                    try:
+                        app = target.appearance
+                        if app is None or app.collisions is None:
+                            return
+                        collide = app.collisions.collideAllWorld
+                    except Exception:
+                        return
+                    if cover:
+                        wreck_fns = _collect_wrecks(target.id)
                     now = Math.Matrix(target.matrix)
                     if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
                         drift = Math.Matrix(base_inv)
@@ -2172,6 +2182,16 @@ class Heatmap(object):
                 if not (row + i) & 7 and clock() > self.deadline:
                     work += clock() - slice_start
                     yield
+                    # the target may have been destroyed while yielded
+                    try:
+                        app = target.appearance
+                        if app is None or app.collisions is None:
+                            return
+                        collide = app.collisions.collideAllWorld
+                    except Exception:
+                        return
+                    if cover:
+                        wreck_fns = _collect_wrecks(target.id)
                     slice_start = clock()
                     frames += 1
                     now = Math.Matrix(target.matrix)
