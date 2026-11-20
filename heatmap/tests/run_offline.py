@@ -316,6 +316,7 @@ def frames(n, dt=0.01, each=None):
 
 
 HELD = set()
+ENTITIES = {}   # entity id -> Vehicle, for BigWorld.entities
 # a building: every point of the scene with x below WALL['x'] between z 10 and 14, if set
 WALL = {'x': None, 'calls': 0, 'broken': False}
 
@@ -333,6 +334,7 @@ def collide_segment(space, a, b, flags):
 
 
 module('BigWorld', player=lambda: STATE.player, target=lambda: STATE.target,
+       entities=ENTITIES,
        collideSegment=collide_segment,
        isKeyDown=lambda key: key in HELD,
        time=lambda: STATE.time, callback=callback, cancelCallback=cancel_callback,
@@ -536,6 +538,7 @@ check(len(STATE.callbacks) == 1, 'tick scheduled at battle start')
 
 enemy = Vehicle(7, 2, (1.0, 0.0, 22.0), math.radians(145.0))
 enemy.turret_yaw = math.radians(40.0)
+ENTITIES[enemy.id] = enemy
 frames(30)
 check(not PUBLISHED and not ROOTS, 'nothing without a target')
 
@@ -916,6 +919,10 @@ HELD.clear()
 frames(2)
 check(g.panel.slider is None, 'the drag ends')
 check(click(('toggle', 'show_allies')) is True and g.cfg['show_allies'] is True, 'allies toggle')
+check(click(('toggle', 'show_all_visible')) is True and g.cfg['show_all_visible'] is True,
+      'show_all_visible toggle on')
+check(click(('toggle', 'show_all_visible')) is True and g.cfg['show_all_visible'] is False,
+      'show_all_visible toggle off')
 
 # cover: a wall hides the left part of the target (the panel is still open, the map is held)
 check(click(balance_slider(), at=0.5) is True and g.cfg['balance'] == 50, 'the middle for the cover checks')
@@ -959,6 +966,34 @@ check(g.cover_failed and PUBLISHED[-1][0] == open_codes and g.tick_cb is not Non
 WALL['broken'], WALL['x'] = False, None
 g.cover_failed = False
 panel_png('panel_cover.png')
+
+# wreck occlusion: a dead tank between the camera and the target hides cells behind it
+wreck = Vehicle(99, 2, (0.0, 0.0, 15.0), 0.0)
+wreck.alive = False
+ENTITIES[wreck.id] = wreck
+g.last_key = None
+del PUBLISHED[:]
+frames(600)
+wreck_codes = PUBLISHED[-1][0]
+wreck_gone = [i for i in range(len(wreck_codes))
+              if open_codes[i] != '\x00' and wreck_codes[i] == '\x00']
+wreck_kept = [i for i in range(len(wreck_codes)) if wreck_codes[i] != '\x00']
+print('     wreck: %d cells hidden, %d left' % (len(wreck_gone), len(wreck_kept)))
+check(len(wreck_gone) > 10 and len(wreck_kept) > 10,
+      'a dead vehicle hides part of the target')
+# a wreck with no collisions is silently skipped
+wreck.appearance = Obj(collisions=None, compoundModel=wreck.appearance.compoundModel)
+g.last_key = None
+del PUBLISHED[:]
+frames(600)
+no_coll_codes = PUBLISHED[-1][0]
+no_coll_kept = [i for i in range(len(no_coll_codes)) if no_coll_codes[i] != '\x00']
+check(len(no_coll_kept) > len(wreck_kept),
+      'wreck without collisions does not hide anything')
+# clean up
+del ENTITIES[wreck.id]
+g.last_key = None
+del PUBLISHED[:]
 
 # the best point: a mark where the aim circle holds the most penetrations
 check(click(('toggle', 'best_point')) is True and g.cfg['best_point'] is True
@@ -1025,7 +1060,8 @@ check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp
       'off from the panel hides the map')
 panel_png('panel_off.png')
 check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
-      and g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0) and g.cfg['hide_covered'] and not g.cfg['show_allies'],
+      and g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0) and g.cfg['hide_covered']
+      and not g.cfg['show_allies'] and not g.cfg['show_all_visible'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
 check(g.cfg['best_point'] is True, 'the defaults turn the best point on')
@@ -1108,6 +1144,61 @@ check(best([r.replace('G', 'r') for r in FIELD], 3.0)[:2] in ((15, 4), (16, 4)),
       'no green at all: the middle of the close calls')
 check(best(['....', '.rr.', '....'], 3.0) is None, 'nothing to pierce: no mark')
 check(best(['G'], 5.0) == (0, 0, False), 'a grid of one cell')
+
+# ---- all visible targets ----
+EVENTS.onAvatarBecomeNonPlayer()
+enemy2 = Vehicle(9, 2, (-3.0, 0.0, 25.0), math.radians(170.0))
+enemy3 = Vehicle(10, 2, (4.0, 0.0, 20.0), math.radians(120.0))
+ENTITIES[enemy2.id] = enemy2
+ENTITIES[enemy3.id] = enemy3
+check('show_all_visible' in hm.DEFAULTS and hm.DEFAULTS['show_all_visible'] is False,
+      'show_all_visible default is False')
+# with the feature off, only the primary
+battle_with(show_all_visible=False, best_point=False, balance=50)
+STATE.target = enemy
+frames(600)
+check(len(g.secondaries) == 0, 'no secondaries when show_all_visible is off')
+# turn on: secondary overlays appear for the other visible enemies
+g.apply_settings({'show_all_visible': True})
+frames(2000)
+check(len(g.secondaries) >= 2, 'secondaries created for visible enemies (%d)' % len(g.secondaries))
+check(g.comp is not None and g.comp.visible, 'primary overlay still present')
+sec_visible = sum(1 for ov in g.secondaries.values() if ov.comp is not None and ov.comp.visible)
+check(sec_visible >= 2, 'secondary overlays visible (%d)' % sec_visible)
+# secondary grids should use the reduced resolution
+for ov in g.secondaries.values():
+    if ov.pic_sig is not None:
+        sec_gw, sec_gh = ov.pic_sig[:2]
+        primary_max = g.res[1]
+        check(sec_gw <= int(primary_max * hm.SECONDARY_SCALE) + 1,
+              'secondary grid smaller: %dx%d vs primary max %d' % (sec_gw, sec_gh, primary_max))
+        break
+# the primary target still gets full quality
+codes, gw, gh = PUBLISHED[-1][:3]
+check(gw > sec_gw + 2, 'primary grid is bigger than secondary: %dx%d vs %dx%d' % (gw, gh, sec_gw, sec_gh))
+# disable: secondaries go away
+g.apply_settings({'show_all_visible': False})
+frames(10)
+check(len(g.secondaries) == 0, 'secondaries removed when feature disabled')
+# an enemy goes off-screen: its overlay is removed
+g.apply_settings({'show_all_visible': True})
+frames(1500)
+check(len(g.secondaries) >= 2, 'secondaries back after re-enabling')
+old_pos = enemy3.matrix.translation
+enemy3.matrix.translation = (100.0, 0.0, 0.0)
+frames(10)
+check(enemy3.id not in g.secondaries, 'off-screen enemy loses its overlay')
+enemy3.matrix.translation = (old_pos.x, old_pos.y, old_pos.z)
+frames(600)
+check(enemy3.id in g.secondaries, 'enemy back on screen gets an overlay again')
+# battle end cleans up secondaries
+EVENTS.onAvatarBecomeNonPlayer()
+check(len(g.secondaries) == 0, 'battle end cleans up secondaries')
+del ENTITIES[enemy2.id]
+del ENTITIES[enemy3.id]
+EVENTS.onAvatarReady()
+STATE.target = enemy
+frames(600)
 
 # settings files of earlier versions: the quality preset becomes a place on the scale, and the
 # numbers the old panel wrote do not outvote the slider

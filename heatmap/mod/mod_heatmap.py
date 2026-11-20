@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Live penetration heatmap: a colored grid over the enemy the crosshair is on.
 
 While the crosshair rests on an enemy (BigWorld.target()), a grid of rays is cast from the camera
@@ -53,7 +53,7 @@ Cover: with `hide_covered` on, every cell on the armor gets one more ray, from t
 that point through the static scene (BigWorld.collideSegment, the test the game's magnetic aim
 uses to tell whether a vehicle is seen). A cell whose ray meets the ground, a building or a rock
 is left empty, like a miss; `covered_alpha` above 0 draws it dimmed instead. Bushes do not stop
-the ray, other vehicles and wrecks are not tested.
+the ray; wrecks (destroyed tanks) are tested alongside the terrain.
 Best point: with `best_point` on, a mark shows where to aim. Every pass ends with a look for
 the cell around which the aim circle (gunRotator.dispersionAngle at the distance to the target)
 holds the most penetrating cells, counted with more weight near the middle, as the shots fall;
@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.6.0'
+__version__ = '0.7.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -114,6 +114,7 @@ DEFAULTS = {
     'alpha': 0.5,
     'margin': 0.10,           # yellow band: the armor is within this share of the penetration
     'show_allies': False,
+    'show_all_visible': False,  # draw heatmaps on all visible enemies, not only the aimed one
     'hide_covered': True,     # leave out the parts of the target behind terrain and buildings
     'covered_alpha': 0.0,     # ... or draw them with this share of `alpha` (0: not at all)
     'best_point': True,       # mark the place to aim at: the most penetrations in the aim circle
@@ -180,6 +181,37 @@ TRACE_FORWARD = 20.0
 PARALLAX_COS = math.cos(math.radians(0.5))
 MAX_HIT_ANGLE = math.pi / 2.0 - 1e-05
 
+
+def _collect_wrecks(target_id):
+    """collideAllWorld callables for destroyed vehicles (wrecks) in the scene.
+
+    Returns a list of callables ``fn(a, b) -> hits``, each the collision model of a dead
+    vehicle that might occlude a living target.  The target itself is excluded, and vehicles
+    whose collision model has already been unloaded are silently skipped.
+    """
+    wrecks = []
+    try:
+        for entity in BigWorld.entities.values():
+            if entity.id == target_id:
+                continue
+            if entity.__class__.__name__ != 'Vehicle':
+                continue
+            if getattr(entity, 'isAlive', lambda: True)():
+                continue
+            app = getattr(entity, 'appearance', None)
+            if app is None:
+                continue
+            coll = getattr(app, 'collisions', None)
+            if coll is None:
+                continue
+            fn = getattr(coll, 'collideAllWorld', None)
+            if fn is not None:
+                wrecks.append(fn)
+    except Exception:
+        pass
+    return wrecks
+
+
 # the port of the game's shell rules, used when its own functions cannot be called:
 # kind -> (has normalization, may ricochet, 3 calibers rule, HEAT jet loss per meter)
 SHELL_RULES = {
@@ -211,6 +243,9 @@ MAX_PART_REACH = 30.0     # a part box farther than this from the vehicle is a b
 IDLE_PERIOD = 0.1         # seconds between looks for a target while there is none
 OFF_PERIOD = 0.3          # ... while the mod is off or the player cannot aim
 MAX_ERRORS = 10           # failed frames in a row before the mod gives up for the battle
+SECONDARY_SCALE = 0.5     # grid scale for non-primary targets (show_all_visible)
+SECONDARY_SLICE_SHARE = 0.7  # share of the time slice a secondary target gets
+MAX_SECONDARY = 8         # most non-primary overlays tracked at once
 _MISSING = object()
 
 
@@ -767,11 +802,11 @@ P_BOX = (52, 56, 61, 255)
 P_EDGE = (96, 100, 106, 255)
 P_ON = (60, 150, 70, 255)
 P_BUTTON = (59, 63, 69, 255)
-LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
-          ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
+LEGEND = (('pen', u'РїСЂРѕР±РёС‚РёРµ'), ('marginal', u'РЅР° РіСЂР°РЅРё'), ('no_pen', u'РЅРµС‚'),
+          ('ricochet', u'СЂРёРєРѕС€РµС‚'), ('no_damage', u'Р±РµР· СѓСЂРѕРЅР°'))
 # what "defaults" in the panel puts back
 PANEL_DEFAULTS = ('enabled', 'balance') + TUNING_KEYS + ('alpha', 'hide_covered', 'best_point',
-                  'show_allies')
+                  'show_allies', 'show_all_visible')
 TRANSPARENCY_STEP = 5     # percent
 
 
@@ -891,7 +926,7 @@ def render_panel(cfg, res, font, measured=None):
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 7 + P_HINT_ROW + P_FOOTER
+    h = P_HEADER + 8 + ROW * 8 + P_HINT_ROW + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -916,18 +951,18 @@ def render_panel(cfg, res, font, measured=None):
         hits.append(((track[0] - 5, y, track[2] + 5, y + ROW), ('slider', key, track[0], track[2])))
 
     c.rect(0, 0, W, P_HEADER, P_HEADER_BG)
-    c.text(font, PAD, mid(0, P_HEADER), u'Тепловая карта пробития', P_TEXT)
+    c.text(font, PAD, mid(0, P_HEADER), u'РўРµРїР»РѕРІР°СЏ РєР°СЂС‚Р° РїСЂРѕР±РёС‚РёСЏ', P_TEXT)
     close = (W - 34, 6, W - 8, P_HEADER - 6)
     c.box(close, P_BUTTON, P_EDGE)
     c.sign(close, 'x', P_TEXT)
     hits.append((close, ('close',)))
     y = P_HEADER + 8
 
-    toggle(y, 'enabled', u'Тепловая карта включена')
+    toggle(y, 'enabled', u'РўРµРїР»РѕРІР°СЏ РєР°СЂС‚Р° РІРєР»СЋС‡РµРЅР°')
     y += ROW
 
     # speed or quality: one slider for the grids and the pace (balance_values)
-    faster, finer = u'Быстрее', u'Подробнее'
+    faster, finer = u'Р‘С‹СЃС‚СЂРµРµ', u'РџРѕРґСЂРѕР±РЅРµРµ'
     c.text(font, PAD, mid(y, y + ROW), faster, P_TEXT)
     c.text(font, W - PAD - width(finer), mid(y, y + ROW), finer, P_TEXT)
     slider(y, 'balance', (PAD + width(faster) + 14, y + 11, W - PAD - width(finer) - 14,
@@ -935,21 +970,21 @@ def render_panel(cfg, res, font, measured=None):
     y += ROW
     parts = []
     if measured and 'fast' in measured:
-        parts.append(u'в движении %dx%d, %.0f раз/с' % measured['fast'])
+        parts.append(u'РІ РґРІРёР¶РµРЅРёРё %dx%d, %.0f СЂР°Р·/СЃ' % measured['fast'])
     if measured and 'fine' in measured:
-        parts.append(u'стоя %dx%d за %.2f с' % measured['fine'])
+        parts.append(u'СЃС‚РѕСЏ %dx%d Р·Р° %.2f СЃ' % measured['fine'])
     if parts:
         hint = u'; '.join(parts)
     elif res[0].endswith('own numbers'):
-        hint = u'часть чисел задана в файле настроек; ползунок их сбросит'
+        hint = u'С‡Р°СЃС‚СЊ С‡РёСЃРµР» Р·Р°РґР°РЅР° РІ С„Р°Р№Р»Рµ РЅР°СЃС‚СЂРѕРµРє; РїРѕР»Р·СѓРЅРѕРє РёС… СЃР±СЂРѕСЃРёС‚'
     else:
-        hint = u'левее — чаще обновляется в движении, правее — мельче сетка'
+        hint = u'Р»РµРІРµРµ вЂ” С‡Р°С‰Рµ РѕР±РЅРѕРІР»СЏРµС‚СЃСЏ РІ РґРІРёР¶РµРЅРёРё, РїСЂР°РІРµРµ вЂ” РјРµР»СЊС‡Рµ СЃРµС‚РєР°'
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
     # transparency: [-] track [+] value; the track is clicked or dragged
     percent = transparency(cfg)
-    c.text(font, PAD, mid(y, y + ROW), u'Прозрачность', P_TEXT)
+    c.text(font, PAD, mid(y, y + ROW), u'РџСЂРѕР·СЂР°С‡РЅРѕСЃС‚СЊ', P_TEXT)
     value = u'%d%%' % percent
     c.text(font, W - PAD - width(value), mid(y, y + ROW), value, P_VALUE)
     plus = (W - PAD - 46 - 24, y + 3, W - PAD - 46, y + ROW - 3)
@@ -973,20 +1008,22 @@ def render_panel(cfg, res, font, measured=None):
         x = c.text(font, x + 27, mid(y, y + ROW), label, P_HINT) + 12
     y += ROW
 
-    toggle(y, 'hide_covered', u'Скрывать за укрытиями')
+    toggle(y, 'hide_covered', u'РЎРєСЂС‹РІР°С‚СЊ Р·Р° СѓРєСЂС‹С‚РёСЏРјРё')
     y += ROW
-    toggle(y, 'best_point', u'Показывать лучшую точку')
+    toggle(y, 'best_point', u'РџРѕРєР°Р·С‹РІР°С‚СЊ Р»СѓС‡С€СѓСЋ С‚РѕС‡РєСѓ')
     y += ROW
-    toggle(y, 'show_allies', u'Показывать и на союзниках')
+    toggle(y, 'show_allies', u'РџРѕРєР°Р·С‹РІР°С‚СЊ Рё РЅР° СЃРѕСЋР·РЅРёРєР°С…')
+    y += ROW
+    toggle(y, 'show_all_visible', u'Р’СЃРµ РІРёРґРёРјС‹Рµ С‚Р°РЅРєРё')
     y += ROW
 
     y += 8
-    c.text(font, PAD, y, u'Ctrl+Shift+G — это окно, Ctrl+Shift+H — вкл/выкл', P_HINT)
-    c.text(font, PAD, y + th + 4, u'В бою курсор появляется, пока зажат Ctrl', P_HINT)
+    c.text(font, PAD, y, u'Ctrl+Shift+G вЂ” СЌС‚Рѕ РѕРєРЅРѕ, Ctrl+Shift+H вЂ” РІРєР»/РІС‹РєР»', P_HINT)
+    c.text(font, PAD, y + th + 4, u'Р’ Р±РѕСЋ РєСѓСЂСЃРѕСЂ РїРѕСЏРІР»СЏРµС‚СЃСЏ, РїРѕРєР° Р·Р°Р¶Р°С‚ Ctrl', P_HINT)
     by0 = y + 2 * th + 14
     x1 = W - PAD
-    for label, action, fill in ((u'Закрыть', ('close',), P_BUTTON),
-                                (u'По умолчанию', ('reset',), P_BUTTON)):
+    for label, action, fill in ((u'Р—Р°РєСЂС‹С‚СЊ', ('close',), P_BUTTON),
+                                (u'РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ', ('reset',), P_BUTTON)):
         bw = max(width(label) + 24, 60)
         r = (x1 - bw, by0, x1, by0 + 26)
         c.box(r, fill, P_EDGE)
@@ -1255,6 +1292,300 @@ def _is_repeat(event):
         return False
 
 
+# ---- secondary (all-visible) overlays ----
+
+class SecondaryOverlay(object):
+    """A heatmap overlay for a visible enemy that is not under the crosshair.
+
+    One overlay per enemy; created and destroyed by Heatmap._frame_secondaries.
+    The grid is SECONDARY_SCALE of the primary resolution, with no best-point mark.
+    """
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.comp = None
+        self.pic = None           # (entity_id, (left, top, w, h) clip, box)
+        self.pic_sig = None
+        self.cur_box = None
+        self.job = None
+        self.job_scene = None
+        self.job_fine = False
+        self.last_key = None
+        self.next_pass = 0.0
+        self.pass_start = 0.0
+        self.deadline = 0.0
+        self.counter = 0
+        self.files = []
+
+    # ---- files and picture ----
+
+    def _write_png(self, png):
+        owner = self.owner
+        self.counter += 1
+        name = 'hm_s%d_%d.png' % (os.getpid(), self.counter)
+        with open(os.path.join(owner.cache_dir, name), 'wb') as f:
+            f.write(png)
+        self.files.append(name)
+        while len(self.files) > 3:
+            try:
+                os.remove(os.path.join(owner.cache_dir, self.files.pop(0)))
+            except OSError:
+                pass
+        try:
+            ResMgr.purge(owner.cache_vfs, True)
+        except Exception:
+            pass
+        return '%s/%s' % (owner.cache_vfs, name)
+
+    def _component(self, tex):
+        c = self.comp
+        if c is not None:
+            c.textureName = tex
+            return c
+        S = GUI.Simple
+        c = self.comp = S(tex)
+        c.materialFX = S.eMaterialFX.BLEND
+        c.widthMode = c.heightMode = S.eSizeMode.PIXEL
+        c.horizontalPositionMode = c.verticalPositionMode = S.ePositionMode.CLIP
+        c.horizontalAnchor = S.eHAnchor.LEFT
+        c.verticalAnchor = S.eVAnchor.TOP
+        try:
+            c.filterType = S.eFilterType.POINT
+        except Exception:
+            pass
+        c.visible = False
+        GUI.addRoot(c)
+        return c
+
+    def _publish(self, target, codes, gw, gh, rect, box):
+        if not any(codes):
+            self.pic = None
+            self._hide()
+            return
+        pal = self.owner.palette
+        rows = [b''.join([pal[c] for c in codes[j * gw:(j + 1) * gw]]) for j in xrange(gh)]
+        sig = (gw, gh, rows)
+        if sig != self.pic_sig or self.comp is None:
+            self._component(self._write_png(png_rgba(gw, gh, rows)))
+            self.pic_sig = sig
+        self.pic = (target.id, rect, box)
+        self._place(self.cur_box or box)
+
+    def _place(self, box):
+        c = self.comp
+        if c is None or self.pic is None:
+            return
+        _, (left, top, w, h), then = self.pic
+        tw, th = then[2] - then[0], then[3] - then[1]
+        if tw <= 0.0 or th <= 0.0:
+            return
+        kx, ky = (box[2] - box[0]) / tw, (box[3] - box[1]) / th
+        x = box[0] + (left - then[0]) * kx
+        y = box[3] + (top - then[3]) * ky
+        sw, sh = GUI.screenResolution()[:2]
+        c.position = (x, y, 1.0)
+        c.width, c.height = w * kx * 0.5 * sw, h * ky * 0.5 * sh
+        c.visible = True
+
+    def _hide(self):
+        if self.comp is not None:
+            self.comp.visible = False
+
+    def destroy(self):
+        owner = self.owner
+        if self.comp is not None:
+            try:
+                GUI.delRoot(self.comp)
+            except Exception:
+                pass
+            self.comp = None
+        for name in self.files:
+            try:
+                os.remove(os.path.join(owner.cache_dir, name))
+            except OSError:
+                pass
+        self.files = []
+        self.job = None
+        self.pic = self.pic_sig = self.cur_box = self.last_key = None
+
+    # ---- pass ----
+
+    def start_pass(self, player, target, view, corners, box, scene, fine):
+        """Begin a pass over the grid with SECONDARY_SCALE of the primary resolution."""
+        owner = self.owner
+        shot = player.getVehicleDescriptor().shot
+        shell = shot.shell
+        kind = shell.kind
+        if kind in NO_MAP_KINDS:
+            self.pic = self.last_key = None
+            self._hide()
+            self.next_pass = BigWorld.time() + 0.5
+            return
+        modern_he = kind == 'HIGH_EXPLOSIVE' and getattr(shell.type, 'mechanics', None) == 'MODERN'
+        he_result = None
+        if modern_he:
+            he_result = getattr(_CrosshairShotResults,
+                                '_CrosshairShotResults__shotResultModernHE', None)
+            if he_result is None:
+                self.pic = self.last_key = None
+                self._hide()
+                self.next_pass = BigWorld.time() + 0.5
+                return
+
+        n = float(len(corners))
+        cx = sum(c[0] for c in corners) / n
+        cy = sum(c[1] for c in corners) / n
+        cz = sum(c[2] for c in corners) / n
+        radius = math.sqrt(max((c[0] - cx) ** 2 + (c[1] - cy) ** 2 + (c[2] - cz) ** 2
+                               for c in corners))
+        own = player.getOwnVehiclePosition()
+        distance = math.sqrt((cx - own.x) ** 2 + (cy - own.y) ** 2 + (cz - own.z) ** 2)
+        full_pp = pen_at(shot, distance)
+        gun = owner._gun(player, own)
+
+        sw, sh = GUI.screenResolution()[:2]
+        x0, y0 = max(box[0], -1.0), max(box[1], -1.0)
+        x1, y1 = min(box[2], 1.0), min(box[3], 1.0)
+        w_px, h_px = (x1 - x0) * 0.5 * sw, (y1 - y0) * 0.5 * sh
+        if w_px < 2.0 or h_px < 2.0:
+            return
+
+        grid_w = max(4, int(owner.res[1] * SECONDARY_SCALE))
+        grid_h = max(4, int(owner.res[2] * SECONDARY_SCALE))
+        min_cell = owner.res[3]
+        finest = max(min_cell, w_px / grid_w, h_px / grid_h)
+        cell = finest
+        if not fine:
+            cell = max(finest, math.sqrt(w_px * h_px / owner._fast_cells()))
+        full = cell <= finest * 1.001
+        gw = min(grid_w, max(1, int(math.ceil(w_px / cell - 1e-6))))
+        gh = min(grid_h, max(1, int(math.ceil(h_px / cell - 1e-6))))
+        cw, ch = cell * 2.0 / sw, cell * 2.0 / sh
+        left = (x0 + x1) * 0.5 - gw * cw * 0.5
+        top = (y0 + y1) * 0.5 + gh * ch * 0.5
+
+        rules = Rules(shell, owner.use_game_rules)
+        cam_dist = math.sqrt((cx - view.pos[0]) ** 2 + (cy - view.pos[1]) ** 2
+                             + (cz - view.pos[2]) ** 2)
+        span = (max(view.near, cam_dist - radius - 0.5), cam_dist + radius + 0.5)
+        self.job_scene, self.job_fine = scene, fine
+        self.job = self._do_pass(target, view, (gw, gh, left, top, cw, ch), span, box, rules,
+                                 full_pp, gun, (scene, full), he_result)
+
+    def _do_pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result):
+        """Cast the grid: like Heatmap._pass but without best-point analysis."""
+        owner = self.owner
+        gw, gh, left, top, cw, ch = grid
+        t0, t1 = span
+        cx, cy, cz = view.pos
+        rx, ry, rz = view.right
+        ux, uy, uz = view.up
+        fx, fy, fz = view.fwd
+        tan_x, tan_y = view.tan_x, view.tan_y
+        gun_x, gun_y, gun_z = gun
+        margin = max(0.0, float(owner.cfg['margin'])) * 100.0
+        lo, hi = 100.0 - margin, 100.0 + margin
+        shell = rules.shell
+        min_pp = max_pp = 0.0
+        if he_result is not None:
+            min_pp, max_pp = _CrosshairShotResults._computePiercingPowerRandomization(shell)
+        collide = target.appearance.collisions.collideAllWorld
+        cover = bool(owner.cfg['hide_covered']) and not owner.cover_failed
+        scene_fn, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
+        wreck_fns = _collect_wrecks(target.id) if cover else []
+        covered_code = COVERED if owner.palette[COVERED + PEN][3:] != b'\x00' else None
+        get_mat = target.getMatinfo
+        mats = {}
+        codes = bytearray(gw * gh)
+        V3, sqrt, clock = Math.Vector3, math.sqrt, time.clock
+        base = Math.Matrix(target.matrix)
+        base_pose = _pose(base)
+        base_inv = Math.Matrix(base)
+        base_inv.invert()
+        drift = None
+
+        for j in xrange(gh):
+            ny = (top - (j + 0.5) * ch) * tan_y
+            ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
+            row = j * gw
+            for i in xrange(gw):
+                nx = (left + (i + 0.5) * cw) * tan_x
+                dx, dy, dz = ax + rx * nx, ay + ry * nx, az + rz * nx
+                k = 1.0 / sqrt(dx * dx + dy * dy + dz * dz)
+                dx *= k
+                dy *= k
+                dz *= k
+                sx, sy, sz = cx + dx * t0, cy + dy * t0, cz + dz * t0
+                a = V3(sx, sy, sz)
+                b = V3(cx + dx * t1, cy + dy * t1, cz + dz * t1)
+                if drift is not None:
+                    a, b = drift.applyPoint(a), drift.applyPoint(b)
+                hits = collide(a, b)
+                if hits:
+                    d0 = hits[0][0]
+                    hx, hy, hz = sx + dx * d0, sy + dy * d0, sz + dz * d0
+                    qx, qy, qz = hx - gun_x, hy - gun_y, hz - gun_z
+                    ql = sqrt(qx * qx + qy * qy + qz * qz)
+                    code = None
+                    if ql > 0.01:
+                        qx /= ql
+                        qy /= ql
+                        qz /= ql
+                        if he_result is not None or dx * qx + dy * qy + dz * qz < PARALLAX_COS:
+                            a = V3(hx - qx * TRACE_BACK, hy - qy * TRACE_BACK,
+                                   hz - qz * TRACE_BACK)
+                            b = V3(hx + qx * TRACE_FORWARD, hy + qy * TRACE_FORWARD,
+                                   hz + qz * TRACE_FORWARD)
+                            if drift is not None:
+                                a, b = drift.applyPoint(a), drift.applyPoint(b)
+                            if he_result is not None:
+                                details = target.collideSegmentExt(a, b)
+                                code = NO_PEN
+                                if details:
+                                    code = HE_CODES.get(int(he_result(
+                                        details, full_pp, shell, min_pp, max_pp, target)), NO_PEN)
+                            else:
+                                shot_hits = collide(a, b)
+                                if shot_hits:
+                                    hits = shot_hits
+                    if code is None:
+                        code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
+                    if cover:
+                        seen = t0 + d0 - COVER_GAP
+                        if seen > 1.0:
+                            cam_a = V3(cx + dx, cy + dy, cz + dz)
+                            cam_b = V3(cx + dx * seen, cy + dy * seen, cz + dz * seen)
+                            try:
+                                hidden = scene_fn(
+                                    space, cam_a, cam_b,
+                                    SCENE_FLAGS) is not None
+                            except Exception:
+                                cover = hidden = False
+                                owner.cover_failed = True
+                            if not hidden:
+                                for wfn in wreck_fns:
+                                    try:
+                                        if wfn(cam_a, cam_b):
+                                            hidden = True
+                                            break
+                                    except Exception:
+                                        pass
+                            if hidden:
+                                code = MISS if covered_code is None else code | covered_code
+                    codes[row + i] = code
+                if not (row + i) & 7 and clock() > self.deadline:
+                    yield
+                    now = Math.Matrix(target.matrix)
+                    if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
+                        drift = Math.Matrix(base_inv)
+                        drift.postMultiply(now)
+                    else:
+                        drift = None
+
+        self._publish(target, codes, gw, gh, (left, top, gw * cw, gh * ch), box)
+        self.last_key = done
+
+
 # ---- the mod ----
 
 class Heatmap(object):
@@ -1312,6 +1643,8 @@ class Heatmap(object):
         self.measured = {}        # see render_panel
         self.report = 0           # passes the open panel still wants to show the numbers of
         self.panel = Panel(self)
+        self.secondaries = {}     # entity id -> SecondaryOverlay
+        self._sec_robin = 0       # round-robin index for time-slicing among secondaries
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
     # ---- files ----
@@ -1491,6 +1824,13 @@ class Heatmap(object):
         self.last_key = None
         self.grid = self.mark_uv = None
         self._hide()
+
+    def _drop_secondaries(self):
+        """Remove all secondary overlays."""
+        for ov in self.secondaries.values():
+            ov.destroy()
+        self.secondaries.clear()
+        self._sec_robin = 0
 
     # ---- target ----
 
@@ -1739,6 +2079,7 @@ class Heatmap(object):
         # when the pass began (so no drift here: the scene does not move with the target)
         cover = bool(self.cfg['hide_covered']) and not self.cover_failed
         scene, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
+        wreck_fns = _collect_wrecks(target.id) if cover else []
         covered_code = COVERED if self.palette[COVERED + PEN][3:] != b'\x00' else None
         covered_cells = 0
         get_mat = target.getMatinfo
@@ -1805,9 +2146,10 @@ class Heatmap(object):
                     if cover:
                         seen = t0 + d0 - COVER_GAP    # meters from the camera
                         if seen > 1.0:
+                            cam_a = V3(cx + dx, cy + dy, cz + dz)
+                            cam_b = V3(cx + dx * seen, cy + dy * seen, cz + dz * seen)
                             try:
-                                hidden = scene(space, V3(cx + dx, cy + dy, cz + dz),
-                                               V3(cx + dx * seen, cy + dy * seen, cz + dz * seen),
+                                hidden = scene(space, cam_a, cam_b,
                                                SCENE_FLAGS) is not None
                             except Exception:
                                 # the engine call is not what the scripts suggest: do without
@@ -1815,6 +2157,14 @@ class Heatmap(object):
                                 self.cover_failed = True
                                 log('cover test failed, the map shows through cover',
                                     traceback.format_exc())
+                            if not hidden:
+                                for wfn in wreck_fns:
+                                    try:
+                                        if wfn(cam_a, cam_b):
+                                            hidden = True
+                                            break
+                                    except Exception:
+                                        pass
                             if hidden:
                                 covered_cells += 1
                                 code = MISS if covered_code is None else code | covered_code
@@ -1888,6 +2238,7 @@ class Heatmap(object):
         player = BigWorld.player()
         if not cfg['enabled'] or not self.cache_ready or not self._can_aim(player):
             self._drop()
+            self._drop_secondaries()
             return OFF_PERIOD
         now = BigWorld.time()
         if self.last_frame is not None and 0.0 < now - self.last_frame < 0.25:
@@ -1901,65 +2252,152 @@ class Heatmap(object):
                 self.base_dt = base if self.base_dt is None else self.base_dt * 0.8 + base * 0.2
         self.last_frame = now
         target = self._pick_target(player, now)
-        if target is None:
-            return IDLE_PERIOD
+        if target is not None:
+            view = View()
+            corners = target_corners(target)
+            box = view.box(corners)
+            if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
+                # behind the camera or off the screen
+                self.job = None
+                self.cur_box = None
+                self._hide()
+            else:
+                self.cur_box = box
+                if self.pic is not None and self.pic[0] == target.id:
+                    self._place(box)
+                else:
+                    self._hide()
+                scene = None
+                if self.job is not None and self.job_fine:
+                    scene = self._scene(player, target, view, corners, box)
+                    if scene_moved(self.job_scene, scene):
+                        self.job = None
+                        self.next_pass = now
+                if self.job is None and now >= self.next_pass:
+                    if scene is None:
+                        scene = self._scene(player, target, view, corners, box)
+                    done = self.last_key
+                    if done is None or scene_moved(done[0], scene):
+                        fine = False
+                    elif not done[1] or box_drifted(done[0][5], box):
+                        fine = True
+                    else:
+                        fine = None
+                    if fine is None:
+                        self.next_pass = now + STILL_CHECK_PERIOD
+                        if self.grid is not None and self.mark_disp > 0.0:
+                            disp = self._dispersion(player)
+                            if not 1.0 / MARK_REDO < disp / self.mark_disp < MARK_REDO:
+                                self.job_scene, self.job_fine = scene, False
+                                self.job = self._remark(target, disp)
+                    else:
+                        self.next_pass = now + 1.0 / self.res[5]
+                        self.pass_start = now
+                        self._start_pass(player, target, view, corners, box, scene, fine)
+                if self.job is not None:
+                    self.deadline = time.clock() + self._slice()
+                    try:
+                        next(self.job)
+                    except StopIteration:
+                        self.job = None
+                    except Exception:
+                        self.job = None
+                        if not self.use_game_rules:
+                            raise
+                        self.use_game_rules = False
+                        log('pass failed with the game rules, using their port',
+                            traceback.format_exc())
+        # secondary overlays for all visible enemies
+        sec_active = False
+        if cfg.get('show_all_visible'):
+            sec_active = self._frame_secondaries(player, now)
+        elif self.secondaries:
+            self._drop_secondaries()
+        if target is not None or sec_active:
+            return 0.0
+        return IDLE_PERIOD
+
+    def _visible_enemies(self, player):
+        """Entity IDs with (entity, corners, box) for enemies on screen now."""
+        primary_id = self.target.id if self.target is not None else None
         view = View()
-        corners = target_corners(target)
-        box = view.box(corners)
-        if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
-            # behind the camera or off the screen
-            self.job = None
-            self.cur_box = None
-            self._hide()
-            return IDLE_PERIOD
-        self.cur_box = box
-        if self.pic is not None and self.pic[0] == target.id:
-            self._place(box)
-        else:
-            self._hide()
-        scene = None
-        if self.job is not None and self.job_fine:
-            scene = self._scene(player, target, view, corners, box)
-            if scene_moved(self.job_scene, scene):
-                # the target or the player moved: the fine map would be of the past
-                self.job = None
-                self.next_pass = now
-        if self.job is None and now >= self.next_pass:
-            if scene is None:
-                scene = self._scene(player, target, view, corners, box)
-            done = self.last_key
-            if done is None or scene_moved(done[0], scene):
-                fine = False            # something moved: a fast pass
-            elif not done[1] or box_drifted(done[0][5], box):
-                fine = True             # nothing moved since a coarse map: now the full one
+        result = {}
+        try:
+            entities = BigWorld.entities.values()
+        except Exception:
+            return result
+        for entity in entities:
+            if entity.id == primary_id:
+                continue
+            if not self._is_target(entity, player):
+                continue
+            corners = target_corners(entity)
+            box = view.box(corners)
+            if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
+                continue
+            result[entity.id] = (entity, corners, box, view)
+            if len(result) >= MAX_SECONDARY:
+                break
+        return result
+
+    def _frame_secondaries(self, player, now):
+        """Manage secondary overlays; returns True if any are active."""
+        visible = self._visible_enemies(player)
+        # remove stale overlays
+        for tid in list(self.secondaries):
+            if tid not in visible:
+                self.secondaries[tid].destroy()
+                del self.secondaries[tid]
+        # create new overlays
+        for tid in visible:
+            if tid not in self.secondaries:
+                self.secondaries[tid] = SecondaryOverlay(self)
+        if not self.secondaries:
+            self._sec_robin = 0
+            return False
+        # update positions
+        for tid, (entity, corners, box, view) in visible.items():
+            ov = self.secondaries[tid]
+            ov.cur_box = box
+            if ov.pic is not None and ov.pic[0] == tid:
+                ov._place(box)
             else:
-                fine = None             # the full map on screen still holds
-            if fine is None:
-                self.next_pass = now + STILL_CHECK_PERIOD
-                if self.grid is not None and self.mark_disp > 0.0:
-                    # the armor is the same, the aim circle may not be: the mark alone again
-                    disp = self._dispersion(player)
-                    if not 1.0 / MARK_REDO < disp / self.mark_disp < MARK_REDO:
-                        self.job_scene, self.job_fine = scene, False
-                        self.job = self._remark(target, disp)
-            else:
-                self.next_pass = now + 1.0 / self.res[5]
-                self.pass_start = now
-                self._start_pass(player, target, view, corners, box, scene, fine)
-        if self.job is not None:
-            self.deadline = time.clock() + self._slice()
-            try:
-                next(self.job)
-            except StopIteration:
-                self.job = None
-            except Exception:
-                self.job = None
-                if not self.use_game_rules:
-                    raise
-                # the game's rule functions may have changed: go on with their port
-                self.use_game_rules = False
-                log('pass failed with the game rules, using their port', traceback.format_exc())
-        return 0.0
+                ov._hide()
+        # advance one secondary's job (round-robin)
+        tids = sorted(self.secondaries.keys())
+        n = len(tids)
+        for _ in xrange(n):
+            idx = self._sec_robin % n
+            self._sec_robin = (self._sec_robin + 1) % n
+            tid = tids[idx]
+            if tid not in visible:
+                continue
+            ov = self.secondaries[tid]
+            entity, corners, box, view = visible[tid]
+            if ov.job is None and now >= ov.next_pass:
+                scene = self._scene(player, entity, view, corners, box)
+                done = ov.last_key
+                if done is None or scene_moved(done[0], scene):
+                    fine = False
+                elif not done[1] or box_drifted(done[0][5], box):
+                    fine = True
+                else:
+                    fine = None
+                    ov.next_pass = now + STILL_CHECK_PERIOD
+                if fine is not None:
+                    ov.next_pass = now + 1.0 / self.res[5]
+                    ov.pass_start = now
+                    ov.start_pass(player, entity, view, corners, box, scene, fine)
+            if ov.job is not None:
+                ov.deadline = time.clock() + self._slice() * SECONDARY_SLICE_SHARE
+                try:
+                    next(ov.job)
+                except StopIteration:
+                    ov.job = None
+                except Exception:
+                    ov.job = None
+                break
+        return True
 
     def _tick(self):
         self.tick_cb = None
@@ -2005,6 +2443,8 @@ class Heatmap(object):
             if self.pic is not None:
                 self.pic = self.pic[:3] + (None,)
             self._hide_mark()
+        # invalidate secondary overlays on any settings change
+        self._drop_secondaries()
         if not cfg['enabled']:
             self._drop()
         elif self.in_battle and self.tick_cb is None:
@@ -2080,6 +2520,7 @@ class Heatmap(object):
             except Exception:
                 pass
             self.tick_cb = None
+        self._drop_secondaries()
         self.target = None
         self.job = None
         self.pic = self.pic_sig = self.last_key = self.cur_box = None
