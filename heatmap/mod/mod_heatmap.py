@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Live penetration heatmap: a colored grid over the enemy the crosshair is on.
 
 While the crosshair rests on an enemy (BigWorld.target()), a grid of rays is cast from the camera
@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.7.1'
+__version__ = '0.7.2'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
