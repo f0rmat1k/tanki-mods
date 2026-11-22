@@ -6,10 +6,11 @@ import os
 import sys
 import tempfile
 import shutil
+import types
+import logging
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD_DIR = os.path.join(HERE, '..', 'mod')
-sys.path.insert(0, MOD_DIR)
 
 passed = failed = 0
 
@@ -24,83 +25,121 @@ def check(name, got, want):
         print('FAIL %s: got %r, want %r' % (name, got, want))
 
 
-# --- test load_config ---
-import mod_sniper_zoom as m
+def check_true(name, val):
+    check(name, bool(val), True)
 
-# default config
+
+# --- stub BigWorld and game modules before importing the mod ---
+
+class FakeSniperAimingSystem(object):
+    def overrideZoom(self, zoom):
+        return zoom
+
+
+class FakeSniperCamera(object):
+    def __init__(self, dataSec=None):
+        self._cfg = {'zooms': [2.0, 4.0, 8.0], 'increasedZoom': False, 'zoom': 4.0}
+        self._SniperCamera__zoom = 4.0
+        self._SniperCamera__dynamicCfg = {'zoomExposure': [0.5, 0.5, 0.5]}
+
+    def create(self, onChangeControlMode=None, isPostmortem=False):
+        pass
+
+    def _handleSettingsChange(self, diff):
+        pass
+
+
+# Install stubs
+bw = types.ModuleType('BigWorld')
+bw.SniperAimingSystem = FakeSniperAimingSystem
+sys.modules['BigWorld'] = bw
+
+aih = types.ModuleType('AvatarInputHandler')
+sys.modules['AvatarInputHandler'] = aih
+
+dc = types.ModuleType('AvatarInputHandler.DynamicCameras')
+sys.modules['AvatarInputHandler.DynamicCameras'] = dc
+aih.DynamicCameras = dc
+
+sc_mod = types.ModuleType('AvatarInputHandler.DynamicCameras.SniperCamera')
+sc_mod.SniperCamera = FakeSniperCamera
+sys.modules['AvatarInputHandler.DynamicCameras.SniperCamera'] = sc_mod
+dc.SniperCamera = sc_mod
+
+sys.path.insert(0, MOD_DIR)
+
+# --- test: module loads without error ---
+import mod_sniper_zoom as m
+check_true('module loaded', m.__version__)
+check_true('version is 0.2.1', m.__version__ == '0.2.1')
+
+# --- test: config manager ---
 tmpdir = tempfile.mkdtemp()
 try:
-    cfg = m.load_config(tmpdir)
-    check('default enabled', cfg['enabled'], True)
-    check('default extra_zooms', cfg['extra_zooms'], [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+    cfg_path = os.path.join(tmpdir, 'mods', 'configs', 'sniper_zoom', 'sniper_zoom.json')
 
-    # config file created
-    path = os.path.join(tmpdir, m.CONFIG_PATH)
-    check('config file created', os.path.isfile(path), True)
-
-    # read back
-    with open(path) as f:
-        raw = json.load(f)
-    check('config keys', set(raw.keys()), {'enabled', 'extra_zooms'})
+    # default config
+    cm = m.ConfigManager(cfg_path)
+    check('default steps', cm.steps, [2.0, 4.0, 8.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+    check('default enabled', cm.enabled, True)
+    check_true('config file created', os.path.isfile(cfg_path))
 
     # custom config
-    with open(path, 'w') as f:
-        json.dump({'enabled': True, 'extra_zooms': [35, 60]}, f)
-    cfg2 = m.load_config(tmpdir)
-    check('custom zooms', cfg2['extra_zooms'], [35.0, 60.0])
+    with open(cfg_path, 'w') as f:
+        json.dump({'enabled': True, 'zooms': [2, 4, 8, 16, 25]}, f)
+    cm2 = m.ConfigManager(cfg_path)
+    check('custom steps', cm2.steps, [2.0, 4.0, 8.0, 16.0, 25.0])
 
-    # invalid zoom values filtered
-    with open(path, 'w') as f:
-        json.dump({'enabled': True, 'extra_zooms': [-5, 0, 25, 150]}, f)
-    cfg3 = m.load_config(tmpdir)
-    check('filtered zooms', cfg3['extra_zooms'], [25.0])
+    # extra_zooms migration
+    with open(cfg_path, 'w') as f:
+        json.dump({'enabled': True, 'extra_zooms': [30, 40, 50]}, f)
+    cm3 = m.ConfigManager(cfg_path)
+    check('migrated steps', cm3.steps, [2.0, 4.0, 8.0, 30.0, 40.0, 50.0])
 
     # disabled
-    with open(path, 'w') as f:
-        json.dump({'enabled': False, 'extra_zooms': [30]}, f)
-    cfg4 = m.load_config(tmpdir)
-    check('disabled', cfg4['enabled'], False)
+    with open(cfg_path, 'w') as f:
+        json.dump({'enabled': False, 'zooms': [2, 4, 8]}, f)
+    cm4 = m.ConfigManager(cfg_path)
+    check('disabled', cm4.enabled, False)
 
-    # bad type
-    with open(path, 'w') as f:
-        json.dump({'enabled': True, 'extra_zooms': 'bad'}, f)
-    cfg5 = m.load_config(tmpdir)
-    check('bad type fallback', cfg5['extra_zooms'], [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+    # invalid values filtered
+    with open(cfg_path, 'w') as f:
+        json.dump({'enabled': True, 'zooms': [-5, 0, 25, 150]}, f)
+    cm5 = m.ConfigManager(cfg_path)
+    check('filtered steps', cm5.steps, [25.0])
+
+    # bad type fallback
+    with open(cfg_path, 'w') as f:
+        json.dump({'enabled': True, 'zooms': 'bad'}, f)
+    cm6 = m.ConfigManager(cfg_path)
+    check('bad type fallback', cm6.steps, [2.0, 4.0, 8.0, 16.0, 25.0, 30.0, 40.0, 50.0])
 
 finally:
     shutil.rmtree(tmpdir)
 
-# --- test _extend_zooms ---
+# --- test: override decorator ---
+class DummyClass(object):
+    def foo(self, x):
+        return x * 2
 
-# adds missing steps, keeps sorted, no duplicates
-zooms1 = [2.0, 4.0, 8.0]
-m._extend_zooms(zooms1, [10.0, 16.0, 25.0])
-check('extend basic', zooms1, [2.0, 4.0, 8.0, 10.0, 16.0, 25.0])
+@m.override(DummyClass, 'foo')
+def hooked_foo(orig, self, x):
+    return orig(self, x) + 100
 
-# no duplicates when extras overlap
-zooms2 = [2.0, 4.0, 8.0, 16.0, 25.0]
-m._extend_zooms(zooms2, [8.0, 16.0, 25.0, 30.0])
-check('extend no dupes', zooms2, [2.0, 4.0, 8.0, 16.0, 25.0, 30.0])
+d = DummyClass()
+check('override works', d.foo(5), 110)
 
-# unsorted extras get sorted into result
-zooms3 = [2.0, 4.0, 8.0]
-m._extend_zooms(zooms3, [50.0, 10.0, 25.0])
-check('extend sorted', zooms3, [2.0, 4.0, 8.0, 10.0, 25.0, 50.0])
+# --- test: applyZoomX ---
+cam = FakeSniperCamera()
+m.g_config.steps = [2.0, 4.0, 8.0, 16.0, 25.0, 50.0]
+m.applyZoomX(cam)
+check('apply zooms', cam._cfg['zooms'], [2.0, 4.0, 8.0, 16.0, 25.0, 50.0])
+check('apply increasedZoom', cam._cfg['increasedZoom'], True)
+check('apply zoomExposure len', len(cam._SniperCamera__dynamicCfg['zoomExposure']), 6)
 
-# empty extras does nothing
-zooms4 = [2.0, 4.0, 8.0]
-m._extend_zooms(zooms4, [])
-check('extend empty', zooms4, [2.0, 4.0, 8.0])
-
-# full default: stock x2 x4 x8 + default extras
-zooms5 = [2.0, 4.0, 8.0]
-m._extend_zooms(zooms5, [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
-check('extend full default', zooms5, [2.0, 4.0, 8.0, 10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
-
-# stock with increased zoom + extras
-zooms6 = [2.0, 4.0, 8.0, 16.0, 25.0]
-m._extend_zooms(zooms6, [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
-check('extend increased', zooms6, [2.0, 4.0, 8.0, 10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+# --- test: overrideZoom bypassed ---
+aim = FakeSniperAimingSystem()
+check('overrideZoom passthrough', aim.overrideZoom(42.0), 42.0)
 
 print('\n%d passed, %d failed' % (passed, failed))
 sys.exit(1 if failed else 0)
