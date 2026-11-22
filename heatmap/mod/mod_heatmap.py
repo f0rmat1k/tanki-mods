@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.13.3'
+__version__ = '0.13.4'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -2142,11 +2142,11 @@ def _danger_pen_check(enemy, player_entity, player_collide, sample_points):
 class DangerIndicator(object):
     """A coloured bar on the left of the screen showing how exposed the player is."""
 
-    BAR_W = 16       # pixels wide
-    BAR_H = 120      # pixels tall
-    BORDER = 2       # black border around the bar
-    BAR_X = 24       # pixels from the left edge
-    BAR_Y_SHARE = 0.6  # share of screen height from the top
+    BAR_W = 40       # pixels wide
+    BAR_H = 200      # pixels tall
+    BORDER = 4       # black border around the bar
+    BAR_X = 30       # pixels from the left edge
+    BAR_Y_SHARE = 0.5  # share of screen height from the top
 
     def __init__(self, owner):
         self.owner = owner
@@ -2155,6 +2155,7 @@ class DangerIndicator(object):
         self.files = []
         self.pic_sig = None
         self._log_count = 0   # debug: log first few updates
+        self._log_next = 0.0  # periodic logging timer
         self.bg_sig = None
         self.level = 0.0        # 0..1 aggregate danger
         self.next_update = 0.0
@@ -2238,6 +2239,7 @@ class DangerIndicator(object):
         except Exception:
             self._hide()
             return
+        enemy_count = 0
         for entity in entities:
             if len(threats) >= DANGER_MAX_ENEMIES:
                 break
@@ -2252,11 +2254,12 @@ class DangerIndicator(object):
                     continue
             except Exception:
                 continue
+            enemy_count += 1
             # line of sight: try multiple heights to avoid ground clipping
             has_los = False
             try:
                 e_pos = entity.position
-                for dy_e, dy_p in ((2.0, 1.0), (2.5, 1.5), (1.5, 0.5)):
+                for dy_e, dy_p in ((2.0, 1.0), (2.5, 1.5), (1.5, 0.5), (3.0, 2.0), (1.0, 0.0)):
                     a = Math.Vector3(e_pos.x, e_pos.y + dy_e, e_pos.z)
                     b = Math.Vector3(player_pos[0], player_pos[1] + dy_p - 1.0, player_pos[2])
                     if BigWorld.collideSegment(space, a, b, SCENE_FLAGS) is None:
@@ -2268,10 +2271,11 @@ class DangerIndicator(object):
                 continue
             aim_w = _enemy_aim_weight(entity, player_pos)
             threats.append((entity, aim_w))
-        do_log = self._log_count < 20
+        do_log = self._log_count < 20 or now >= self._log_next
         if do_log:
             self._log_count += 1
-            log('danger: threats=%d samples=%d' % (len(threats), len(sample_points)))
+            self._log_next = now + 30.0
+            log('danger: enemies=%d los_threats=%d samples=%d' % (enemy_count, len(threats), len(sample_points)))
         if not threats:
             self.level = 0.0
             self._show_bar()
