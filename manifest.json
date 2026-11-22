@@ -57,12 +57,12 @@
       "dirs": [
         "res_mods/{client}/mods/heatmap_cache"
       ],
-      "file": "heatmap_0.10.0.mtmod",
+      "file": "heatmap_0.11.0.mtmod",
       "name": "Тепловая карта пробития",
-      "sha256": "cf5310f69f70ccfd02967769358aa23c713a950b2d27431df413ec0f594dba4f",
-      "size": 125668,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/heatmap-v0.10.0/heatmap_0.10.0.mtmod",
-      "version": "0.10.0"
+      "sha256": "e8fc752b9fc993df3dc173dc2880eb5b19dd8758fe4305d35e0184e00e5115a7",
+      "size": 136577,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/heatmap-v0.11.0/heatmap_0.11.0.mtmod",
+      "version": "0.11.0"
     },
     "nearyou_ranks": {
       "description": "Ранг и сложность танка из тир-листа Near_You в карусели ангара; фильтр в поиске: #S, #A+, #лёгкий",
