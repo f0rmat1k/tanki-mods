@@ -1363,67 +1363,6 @@ EVENTS.onAvatarReady()
 STATE.target = enemy
 frames(600)
 
-# ---- danger indicator: position danger light ----
-check(g.cfg.get('danger', False) is False, 'danger default is off')
-check(g.danger is None, 'no danger indicator when off')
-
-# add the player's own vehicle entity to the world so collideAllWorld works on it
-player_vehicle = Vehicle(1, 1, (0.0, 0.0, 0.0), 0.0)
-ENTITIES[player_vehicle.id] = player_vehicle
-# add an enemy facing the player: at z=20, turret yaw=pi (facing back toward the player at z=0)
-danger_enemy = Vehicle(15, 2, (0.0, 0.0, 20.0), 0.0)
-danger_enemy.turret_yaw = math.pi   # turret faces back toward the player
-ENTITIES[danger_enemy.id] = danger_enemy
-
-g.apply_settings({'danger': True})
-frames(600)
-check(g.danger is not None, 'danger indicator created when enabled')
-check(g.danger.comp is not None and g.danger.comp.visible, 'danger indicator visible')
-# with an enemy aiming at us with AP pen 175, there should be some danger
-check(g.danger.level > 0.0, 'danger level > 0 with enemy aiming at player (%.2f)' % g.danger.level)
-
-# move enemy behind a wall: danger should go to 0
-WALL['x'] = 2.0
-frames(600)
-check(g.danger.level == 0.0, 'danger is 0 when enemy is behind wall')
-WALL['x'] = None
-
-# enemy turret turned away: not aiming at us
-# both enemies must point their turrets away from the player (at z=0)
-# enemy hull yaw ~= 145deg: turret_yaw = -(145 deg) puts the turret at ~0 deg = +z = away
-old_enemy_turret = enemy.turret_yaw
-enemy.turret_yaw = -math.radians(145)
-danger_enemy.turret_yaw = 0.0    # hull yaw=0, turret_yaw=0 -> faces +z = away from z=0
-frames(600)
-check(g.danger.level < 0.5, 'danger is low when all enemy turrets face away (%.2f)' % g.danger.level)
-
-# turn turret back toward player
-danger_enemy.turret_yaw = math.pi
-enemy.turret_yaw = old_enemy_turret  # restore primary target's turret
-frames(600)
-check(g.danger.level > 0.0, 'danger returns when enemy turret faces player again')
-
-# disable danger indicator
-g.apply_settings({'danger': False})
-check(g.danger is None, 'danger indicator destroyed when disabled')
-
-# panel toggle
-game.handleKeyEvent(PANEL_KEY)
-check(g.cfg['danger'] is False, 'danger starts off in panel')
-check(click(('toggle', 'danger')) is True and g.cfg['danger'] is True, 'danger toggle on')
-check(click(('toggle', 'danger')) is True and g.cfg['danger'] is False, 'danger toggle off')
-check(saved()['danger'] is False, 'danger saved to config')
-game.handleKeyEvent(KeyEvent(1))
-
-# battle end cleans up danger
-g.apply_settings({'danger': True})
-frames(600)
-check(g.danger is not None, 'danger before battle end')
-EVENTS.onAvatarBecomeNonPlayer()
-check(g.danger is None, 'battle end cleans up danger')
-del ENTITIES[danger_enemy.id]
-del ENTITIES[player_vehicle.id]
-EVENTS.onAvatarReady()
 STATE.target = enemy
 frames(600)
 

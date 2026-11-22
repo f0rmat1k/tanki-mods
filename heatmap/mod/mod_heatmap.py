@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.13.4'
+__version__ = '0.14.0'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -130,7 +130,6 @@ DEFAULTS = {
     },
     'xray': 'off',            # enemy silhouettes behind walls: 'off', 'always', 'key'
     'xray_key': 'MOUSE3',     # key name (Keys.KEY_*) when xray='key'; MOUSE3 = Mouse4
-    'danger': False,           # danger indicator: how exposed the player is to aimed enemies
     'debug': False,
 }
 
@@ -165,14 +164,6 @@ XRAY_COLOR = (255, 100, 30, 100)  # RGBA: semi-transparent orange
 XRAY_RATE = 2.0               # updates per second for xray silhouettes
 XRAY_MAX = 5                  # most enemies to draw xray silhouettes for
 XRAY_MODES = ('off', 'always', 'key')   # panel cycle order
-# danger indicator: how exposed the player is to enemies that can see and shoot them
-DANGER_RATE = 3.0             # updates per second
-DANGER_MAX_ENEMIES = 6        # most enemies to evaluate
-DANGER_AIM_COS = math.cos(math.radians(90))  # turret within 90 deg = full threat weight
-DANGER_SAMPLE_N = 5           # control points on the player's collision model
-DANGER_GREEN = (0, 200, 0, 180)       # safe
-DANGER_YELLOW = (220, 200, 0, 180)    # moderate risk
-DANGER_RED = (220, 30, 0, 180)        # high risk
 
 DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the game
 FAST_FILL = 0.85              # share of that time a fast pass is planned to take
@@ -960,7 +951,7 @@ LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_p
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
 PANEL_DEFAULTS = ('enabled', 'resolution', 'speed') + TUNING_KEYS + ('alpha', 'hide_covered',
-                  'best_point', 'show_allies', 'show_all_visible', 'xray', 'danger')
+                  'best_point', 'show_allies', 'show_all_visible', 'xray')
 TRANSPARENCY_STEP = 5     # percent
 
 
@@ -1192,9 +1183,6 @@ def render_panel(cfg, res, font, measured=None):
     c.text(font, r[0] + (bw - width(xray_label)) // 2, mid(y, y + ROW), xray_label,
            P_TEXT if xray != 'off' else P_HINT)
     hits.append(((0, y, W, y + ROW), ('cycle_xray',)))
-    y += ROW
-
-    toggle(y, 'danger', u'Индикатор опасности')
     y += ROW
 
     y += 8
@@ -1984,393 +1972,6 @@ def _xray_key_code(cfg):
         return None
 
 
-# ---- danger indicator ----
-
-def _enemy_aim_weight(entity, player_pos):
-    """How much the enemy's turret faces the player: 1.0 = dead on, 0.3 = looking away.
-
-    Every enemy with line of sight is a threat; the turret direction only scales the weight.
-    """
-    try:
-        model = entity.appearance.compoundModel
-        turret = model.node('turret')
-        if turret is None:
-            return 0.5
-        m = Math.Matrix(turret)
-        fwd = m.applyToAxis(2)
-        dx = player_pos[0] - m.translation.x
-        dy = player_pos[1] - m.translation.y
-        dz = player_pos[2] - m.translation.z
-        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if dist < 0.1:
-            return 1.0
-        cos = (dx * fwd.x + dy * fwd.y + dz * fwd.z) / dist
-        if cos >= DANGER_AIM_COS:
-            return 1.0
-        if cos >= 0.0:
-            return 0.5
-        return 0.3
-    except Exception:
-        return 0.5
-
-
-def _player_collide_fn(player):
-    """The collideAllWorld callable for the player's own vehicle, or None.
-
-    Returns (entity, collide_fn).  When the collision model is not loaded,
-    entity is still returned (position is usable) but collide_fn is None.
-    """
-    try:
-        vid = player.playerVehicleID
-        entity = BigWorld.entities[vid]
-        app = entity.appearance
-        if app is None:
-            return entity, None
-        if app.collisions is None:
-            return entity, None
-        return entity, app.collisions.collideAllWorld
-    except Exception:
-        return None, None
-
-
-def _sample_player_points(entity):
-    """N world-space sample points on the player's collision model, spread across hull and turret."""
-    points = []
-    try:
-        base = Math.Matrix(entity.matrix)
-        app = entity.appearance
-        collisions = app.collisions
-        model = app.compoundModel
-        for idx, node_name in PARTS[:3]:    # chassis, hull, turret (skip gun)
-            try:
-                if node_name is None:
-                    matrix = base
-                else:
-                    node = model.node(node_name)
-                    if node is None:
-                        continue
-                    matrix = Math.Matrix(node)
-                bb = collisions.getBoundingBox(idx)
-                lo, hi = bb[0], bb[1]
-                cx = (lo[0] + hi[0]) * 0.5
-                cy = (lo[1] + hi[1]) * 0.5
-                cz = (lo[2] + hi[2]) * 0.5
-                p = matrix.applyPoint(Math.Vector3(cx, cy, cz))
-                points.append((p.x, p.y, p.z))
-            except Exception:
-                continue
-    except Exception:
-        pass
-    if not points:
-        try:
-            pos = entity.position
-            points = [(pos.x, pos.y + 1.0, pos.z)]
-        except Exception:
-            pass
-    return points
-
-
-def _danger_pen_check(enemy, player_entity, player_collide, sample_points):
-    """How threatening *enemy* is to the player: 0.0 (safe) to 1.0 (pens everything).
-
-    Casts rays from the enemy's gun position through the sample points on the player's
-    collision model and checks whether the enemy's default shell penetrates.
-    """
-    try:
-        shot = enemy.typeDescriptor.shot
-    except Exception:
-        return 0.0
-    try:
-        e_pos = enemy.position
-        ex, ey, ez = e_pos.x, e_pos.y + 2.0, e_pos.z   # rough gun height
-    except Exception:
-        return 0.0
-    # distance from enemy to player center
-    try:
-        p_pos = player_entity.position
-        dist = math.sqrt((ex - p_pos.x) ** 2 + (ey - p_pos.y) ** 2 + (ez - p_pos.z) ** 2)
-    except Exception:
-        dist = 200.0
-    pen_mm = pen_at(shot, dist)
-    if pen_mm <= 0.0:
-        return 0.0
-    V3 = Math.Vector3
-    hits_total = 0
-    pens = 0
-    if player_collide is None:
-        return min(1.0, pen_mm / 300.0)
-    get_mat = getattr(player_entity, 'getMatinfo', None)
-    if get_mat is None:
-        return min(1.0, pen_mm / 300.0)
-    for px, py, pz in sample_points:
-        dx, dy, dz = px - ex, py - ey, pz - ez
-        length = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if length < 0.1:
-            continue
-        # cast from behind the enemy position through the sample point
-        a = V3(ex - dx * 0.1, ey - dy * 0.1, ez - dz * 0.1)
-        b = V3(px + dx * 0.5, py + dy * 0.5, pz + dz * 0.5)
-        ray_hits = player_collide(a, b)
-        if not ray_hits:
-            continue
-        hits_total += 1
-        # simplified penetration check: first hit only
-        h = ray_hits[0]
-        cos = h[1]
-        if cos < 1e-05:
-            cos = 1e-05
-        kind, part = h[2], h[3]
-        try:
-            mat = get_mat(part, kind)
-        except Exception:
-            mat = None
-        if mat is None:
-            continue
-        armor = mat.armor
-        if armor is None:
-            continue
-        if not mat.useHitAngle:
-            cos = 1.0
-        effective = armor / cos
-        if pen_mm >= effective:
-            pens += 1
-    if hits_total == 0:
-        return 0.0
-    return float(pens) / float(hits_total)
-
-
-class DangerIndicator(object):
-    """A coloured bar on the left of the screen showing how exposed the player is."""
-
-    BAR_W = 40       # pixels wide
-    BAR_H = 200      # pixels tall
-    BORDER = 4       # black border around the bar
-    BAR_X = 30       # pixels from the left edge
-    BAR_Y_SHARE = 0.5  # share of screen height from the top
-
-    def __init__(self, owner):
-        self.owner = owner
-        self.comp = None      # the coloured bar
-        self.bg_comp = None   # black border behind the bar
-        self.files = []
-        self.pic_sig = None
-        self._log_count = 0   # debug: log first few updates
-        self._log_next = 0.0  # periodic logging timer
-        self.bg_sig = None
-        self.level = 0.0        # 0..1 aggregate danger
-        self.next_update = 0.0
-
-    def _write_png(self, png):
-        owner = self.owner
-        counter = owner.counter
-        owner.counter += 1
-        name = 'hm_dg%03d.png' % (counter % 1000)
-        path = os.path.join(owner.cache_dir, name)
-        with open(path, 'wb') as f:
-            f.write(png)
-        self.files.append(name)
-        return '%s/%s' % (owner.cache_vfs, name)
-
-    def _make_comp(self, tex):
-        S = GUI.Simple
-        c = S(tex)
-        c.materialFX = S.eMaterialFX.BLEND
-        c.widthMode = c.heightMode = S.eSizeMode.PIXEL
-        c.horizontalPositionMode = c.verticalPositionMode = S.ePositionMode.CLIP
-        c.horizontalAnchor = S.eHAnchor.LEFT
-        c.verticalAnchor = S.eVAnchor.TOP
-        try:
-            c.filterType = S.eFilterType.POINT
-        except Exception:
-            pass
-        c.visible = False
-        GUI.addRoot(c)
-        return c
-
-    def _component(self, tex):
-        c = self.comp
-        if c is not None:
-            c.textureName = tex
-            return c
-        c = self.comp = self._make_comp(tex)
-        return c
-
-    def _bg_component(self, tex):
-        c = self.bg_comp
-        if c is not None:
-            c.textureName = tex
-            return c
-        c = self.bg_comp = self._make_comp(tex)
-        return c
-
-    def update(self, player, now):
-        """Evaluate the danger level and show the bar."""
-        if now < self.next_update:
-            return
-        self.next_update = now + 1.0 / DANGER_RATE
-        player_entity, player_collide = _player_collide_fn(player)
-        if player_entity is None:
-            if self._log_count < 3:
-                self._log_count += 1
-                log('danger: no player entity (pvid=%s)' % getattr(player, 'playerVehicleID', '?'))
-            self._hide()
-            return
-        try:
-            p_pos = player_entity.position
-            player_pos = (p_pos.x, p_pos.y + 1.0, p_pos.z)
-        except Exception:
-            self._hide()
-            return
-        sample_points = _sample_player_points(player_entity)
-        if not sample_points:
-            try:
-                pp = player_entity.position
-                sample_points = [(pp.x, pp.y + 1.0, pp.z)]
-            except Exception:
-                self._hide()
-                return
-        # find threatening enemies
-        threats = []
-        try:
-            space = player.spaceID
-            my_team = player.team
-            my_id = getattr(player, 'playerVehicleID', None)
-            entities = BigWorld.entities.values()
-        except Exception:
-            self._hide()
-            return
-        enemy_count = 0
-        for entity in entities:
-            if len(threats) >= DANGER_MAX_ENEMIES:
-                break
-            try:
-                if entity.id == my_id:
-                    continue
-                if entity.__class__.__name__ != 'Vehicle':
-                    continue
-                if not getattr(entity, 'isStarted', True) or not entity.isAlive():
-                    continue
-                if entity.publicInfo['team'] == my_team:
-                    continue
-            except Exception:
-                continue
-            enemy_count += 1
-            # line of sight: try multiple heights to avoid ground clipping
-            has_los = False
-            try:
-                e_pos = entity.position
-                for dy_e, dy_p in ((2.0, 1.0), (2.5, 1.5), (1.5, 0.5), (3.0, 2.0), (1.0, 0.0)):
-                    a = Math.Vector3(e_pos.x, e_pos.y + dy_e, e_pos.z)
-                    b = Math.Vector3(player_pos[0], player_pos[1] + dy_p - 1.0, player_pos[2])
-                    if BigWorld.collideSegment(space, a, b, SCENE_FLAGS) is None:
-                        has_los = True
-                        break
-            except Exception:
-                continue
-            if not has_los:
-                continue
-            aim_w = _enemy_aim_weight(entity, player_pos)
-            threats.append((entity, aim_w))
-        do_log = self._log_count < 20 or now >= self._log_next
-        if do_log:
-            self._log_count += 1
-            self._log_next = now + 30.0
-            log('danger: enemies=%d los_threats=%d samples=%d' % (enemy_count, len(threats), len(sample_points)))
-        if not threats:
-            self.level = 0.0
-            self._show_bar()
-            return
-        # aggregate danger: weighted by turret direction
-        max_pen = 0.0
-        for enemy, aim_w in threats:
-            d = _danger_pen_check(enemy, player_entity, player_collide, sample_points)
-            d *= aim_w
-            if do_log:
-                log('  enemy %s pen=%.2f aim=%.1f' % (enemy.id, d, aim_w))
-            if d > max_pen:
-                max_pen = d
-        n = len(threats)
-        self.level = min(1.0, max_pen * 0.7 + min(n, 3) / 3.0 * 0.3)
-        if do_log:
-            log('  level=%.2f' % self.level)
-        self._show_bar()
-
-    def _show_bar(self):
-        level = self.level
-        if level < 0.01:
-            self._hide()
-            return
-        if level < 0.3:
-            color = DANGER_GREEN
-        elif level < 0.65:
-            t = (level - 0.3) / 0.35
-            color = (int(DANGER_GREEN[0] + (DANGER_YELLOW[0] - DANGER_GREEN[0]) * t),
-                     int(DANGER_GREEN[1] + (DANGER_YELLOW[1] - DANGER_GREEN[1]) * t),
-                     int(DANGER_GREEN[2] + (DANGER_YELLOW[2] - DANGER_GREEN[2]) * t),
-                     DANGER_GREEN[3])
-        else:
-            t = min((level - 0.65) / 0.35, 1.0)
-            color = (int(DANGER_YELLOW[0] + (DANGER_RED[0] - DANGER_YELLOW[0]) * t),
-                     int(DANGER_YELLOW[1] + (DANGER_RED[1] - DANGER_YELLOW[1]) * t),
-                     int(DANGER_YELLOW[2] + (DANGER_RED[2] - DANGER_YELLOW[2]) * t),
-                     DANGER_RED[3])
-        w, h, b = self.BAR_W, self.BAR_H, self.BORDER
-        bw, bh = w + b * 2, h + b * 2
-        sw, sh = GUI.screenResolution()[:2]
-        x = -1.0 + self.BAR_X * 2.0 / sw
-        y = 1.0 - self.BAR_Y_SHARE * 2.0
-        # black background border
-        bg_sig = (bw, bh)
-        if bg_sig != self.bg_sig or self.bg_comp is None:
-            bg_color = (0, 0, 0, 200)
-            bg_pixel = bytes(bytearray(bg_color))
-            bg_rows = [bg_pixel * bw] * bh
-            self._bg_component(self._write_png(png_rgba(bw, bh, bg_rows)))
-            self.bg_sig = bg_sig
-        bg = self.bg_comp
-        bg.position = (x, y, 1.0)
-        bg.width, bg.height = bw, bh
-        bg.visible = True
-        # coloured bar on top
-        pixel = bytes(bytearray(color))
-        rows = [pixel * w] * h
-        sig = (w, h, color)
-        if sig != self.pic_sig or self.comp is None:
-            self._component(self._write_png(png_rgba(w, h, rows)))
-            self.pic_sig = sig
-        bx = -1.0 + (self.BAR_X + b) * 2.0 / sw
-        by = y - b * 2.0 / sh
-        c = self.comp
-        c.position = (bx, by, 0.9)
-        c.width, c.height = w, h
-        c.visible = True
-
-    def _hide(self):
-        if self.comp is not None:
-            self.comp.visible = False
-        if self.bg_comp is not None:
-            self.bg_comp.visible = False
-
-    def destroy(self):
-        for c in (self.comp, self.bg_comp):
-            if c is not None:
-                try:
-                    GUI.delRoot(c)
-                except Exception:
-                    pass
-        self.comp = None
-        self.bg_comp = None
-        owner = self.owner
-        for name in self.files:
-            try:
-                os.remove(os.path.join(owner.cache_dir, name))
-            except OSError:
-                pass
-        self.files = []
-        self.pic_sig = None
-        self.bg_sig = None
-
-
 # ---- the mod ----
 
 class Heatmap(object):
@@ -2432,7 +2033,6 @@ class Heatmap(object):
         self._sec_robin = 0       # round-robin index for time-slicing among secondaries
         self.xrays = {}           # entity id -> XrayOverlay (enemies behind walls)
         self._xray_robin = 0
-        self.danger = None        # DangerIndicator (position danger light)
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
     # ---- files ----
@@ -3330,18 +2930,7 @@ class Heatmap(object):
             xray_active = self._frame_xrays(player, now)
         elif self.xrays:
             self._drop_xrays()
-        # danger indicator
-        danger_active = False
-        if cfg.get('danger'):
-            if self.danger is None:
-                self.danger = DangerIndicator(self)
-                log('danger indicator created')
-            self.danger.update(player, now)
-            danger_active = True
-        elif self.danger is not None:
-            self.danger.destroy()
-            self.danger = None
-        if target is not None or sec_active or xray_active or danger_active:
+        if target is not None or sec_active or xray_active:
             return 0.0
         return IDLE_PERIOD
 
@@ -3474,9 +3063,6 @@ class Heatmap(object):
         # invalidate secondary and xray overlays on any settings change
         self._drop_secondaries()
         self._drop_xrays()
-        if self.danger is not None:
-            self.danger.destroy()
-            self.danger = None
         if not cfg['enabled']:
             self._drop()
         elif self.in_battle and self.tick_cb is None:
@@ -3555,9 +3141,6 @@ class Heatmap(object):
             self.tick_cb = None
         self._drop_secondaries()
         self._drop_xrays()
-        if self.danger is not None:
-            self.danger.destroy()
-            self.danger = None
         self.target = None
         self.job = None
         self.pic = self.pic_sig = self.last_key = self.cur_box = None
