@@ -32,7 +32,7 @@ tmpdir = tempfile.mkdtemp()
 try:
     cfg = m.load_config(tmpdir)
     check('default enabled', cfg['enabled'], True)
-    check('default extra_zooms', cfg['extra_zooms'], [30.0, 40.0, 50.0])
+    check('default extra_zooms', cfg['extra_zooms'], [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
 
     # config file created
     path = os.path.join(tmpdir, m.CONFIG_PATH)
@@ -65,45 +65,42 @@ try:
     with open(path, 'w') as f:
         json.dump({'enabled': True, 'extra_zooms': 'bad'}, f)
     cfg5 = m.load_config(tmpdir)
-    check('bad type fallback', cfg5['extra_zooms'], [30.0, 40.0, 50.0])
+    check('bad type fallback', cfg5['extra_zooms'], [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
 
 finally:
     shutil.rmtree(tmpdir)
 
-# --- test zoom extension logic ---
-class FakeBaseCfg(dict):
-    pass
+# --- test _extend_zooms ---
 
+# adds missing steps, keeps sorted, no duplicates
+zooms1 = [2.0, 4.0, 8.0]
+m._extend_zooms(zooms1, [10.0, 16.0, 25.0])
+check('extend basic', zooms1, [2.0, 4.0, 8.0, 10.0, 16.0, 25.0])
 
-# simulate what _readBaseCfg does
-base = FakeBaseCfg({'zooms': [2.0, 4.0, 8.0, 16.0, 25.0]})
-extra = [30.0, 40.0, 50.0]
-zooms = base['zooms']
-top = zooms[-1]
-for z in extra:
-    if z > top:
-        zooms.append(z)
-check('extended zooms', zooms, [2.0, 4.0, 8.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+# no duplicates when extras overlap
+zooms2 = [2.0, 4.0, 8.0, 16.0, 25.0]
+m._extend_zooms(zooms2, [8.0, 16.0, 25.0, 30.0])
+check('extend no dupes', zooms2, [2.0, 4.0, 8.0, 16.0, 25.0, 30.0])
 
-# no duplicates when extra has values <= top
-base2 = FakeBaseCfg({'zooms': [2.0, 4.0, 8.0, 16.0, 25.0]})
-extra2 = [8.0, 16.0, 25.0]
-zooms2 = base2['zooms']
-top2 = zooms2[-1]
-for z in extra2:
-    if z > top2:
-        zooms2.append(z)
-check('no duplicates', zooms2, [2.0, 4.0, 8.0, 16.0, 25.0])
+# unsorted extras get sorted into result
+zooms3 = [2.0, 4.0, 8.0]
+m._extend_zooms(zooms3, [50.0, 10.0, 25.0])
+check('extend sorted', zooms3, [2.0, 4.0, 8.0, 10.0, 25.0, 50.0])
 
-# single extra zoom
-base3 = FakeBaseCfg({'zooms': [2.0, 4.0, 8.0]})
-extra3 = [12.0]
-zooms3 = base3['zooms']
-top3 = zooms3[-1]
-for z in extra3:
-    if z > top3:
-        zooms3.append(z)
-check('single extra', zooms3, [2.0, 4.0, 8.0, 12.0])
+# empty extras does nothing
+zooms4 = [2.0, 4.0, 8.0]
+m._extend_zooms(zooms4, [])
+check('extend empty', zooms4, [2.0, 4.0, 8.0])
+
+# full default: stock x2 x4 x8 + default extras
+zooms5 = [2.0, 4.0, 8.0]
+m._extend_zooms(zooms5, [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+check('extend full default', zooms5, [2.0, 4.0, 8.0, 10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+
+# stock with increased zoom + extras
+zooms6 = [2.0, 4.0, 8.0, 16.0, 25.0]
+m._extend_zooms(zooms6, [10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
+check('extend increased', zooms6, [2.0, 4.0, 8.0, 10.0, 16.0, 25.0, 30.0, 40.0, 50.0])
 
 print('\n%d passed, %d failed' % (passed, failed))
 sys.exit(1 if failed else 0)

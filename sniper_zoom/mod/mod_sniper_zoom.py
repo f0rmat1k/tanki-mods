@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Extended sniper zoom: adds higher magnification steps beyond the stock x25.
+"""Extended sniper zoom: adds higher magnification steps to the sniper scope.
 
-The sniper camera reads its zoom steps from avatar_input_handler.xml (sniperMode/camera, 'zooms'
-string, default '2 4 8 16 25') in SniperCamera._readBaseCfg. The mod hooks that method and appends
-extra steps. It also extends zoomExposure so the camera dynamics work at higher zoom levels.
+Stock tanks typically have x2, x4, x8 (x16/x25 require equipment). This mod injects
+extra zoom steps (default: x10 x16 x25 x30 x40 x50) into every sniper camera, regardless
+of equipment. It hooks both _readBaseCfg (to extend _baseCfg) and _readConfigs (to ensure
+_cfg also gets the extras and zoomExposure is long enough).
 Settings: mods/configs/sniper_zoom/sniper_zoom.json.
 """
 import json
 import os
 import traceback
 
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 
 CONFIG_PATH = os.path.join('mods', 'configs', 'sniper_zoom', 'sniper_zoom.json')
 DEFAULTS = {
     'enabled': True,
-    'extra_zooms': [30, 40, 50],
+    'extra_zooms': [10, 16, 25, 30, 40, 50],
 }
 
 
@@ -53,6 +54,17 @@ def load_config(root):
     return cfg
 
 
+def _extend_zooms(zooms, extra):
+    """Merge extra zoom steps into the existing sorted list, skipping duplicates."""
+    existing = set(zooms)
+    for z in extra:
+        if z not in existing:
+            zooms.append(z)
+            existing.add(z)
+    zooms.sort()
+    return zooms
+
+
 def init():
     try:
         cfg = load_config(_game_root())
@@ -72,11 +84,11 @@ def init():
             try:
                 zooms = self._baseCfg.get('zooms', [])
                 if zooms:
-                    top = zooms[-1]
-                    for z in extra:
-                        if z > top:
-                            zooms.append(z)
+                    _extend_zooms(zooms, extra)
                     self._baseCfg['zooms'] = zooms
+                    log('_readBaseCfg: zooms now', zooms)
+                else:
+                    log('_readBaseCfg: no zooms in _baseCfg')
             except Exception:
                 log('zoom extend failed', traceback.format_exc())
 
@@ -87,22 +99,38 @@ def init():
         def _readConfigs(self, dataSec):
             orig_read_cfgs(self, dataSec)
             try:
+                cfg_zooms = self._cfg.get('zooms')
+                base_zooms = self._baseCfg.get('zooms', [])
+                if cfg_zooms is not None:
+                    _extend_zooms(cfg_zooms, extra)
+                    self._cfg['zooms'] = cfg_zooms
+                    log('_readConfigs: _cfg zooms now', cfg_zooms)
+                elif base_zooms:
+                    self._cfg['zooms'] = list(base_zooms)
+                    log('_readConfigs: copied _baseCfg zooms to _cfg', base_zooms)
                 dyn = self._SniperCamera__dynamicCfg
                 ze = dyn.get('zoomExposure', [])
-                zooms = self._baseCfg.get('zooms', [])
-                if len(ze) < len(zooms) and ze:
+                all_zooms = self._cfg.get('zooms', base_zooms)
+                if len(ze) < len(all_zooms) and ze:
                     last = ze[-1]
-                    while len(ze) < len(zooms):
+                    while len(ze) < len(all_zooms):
                         last = max(0.05, last - 0.05)
                         ze.append(last)
                     dyn['zoomExposure'] = ze
             except Exception:
-                log('zoomExposure extend failed', traceback.format_exc())
+                log('_readConfigs extend failed', traceback.format_exc())
 
         SniperCamera._readConfigs = _readConfigs
 
         def __getZooms(self):
-            return self._cfg['zooms']
+            zooms = self._cfg.get('zooms')
+            if zooms:
+                return zooms
+            zooms = self._baseCfg.get('zooms')
+            if zooms:
+                return zooms
+            log('__getZooms: no zooms found, returning default')
+            return [2.0, 4.0, 8.0]
 
         SniperCamera._SniperCamera__getZooms = __getZooms
         log('v%s loaded: extra zoom steps %s' % (__version__, extra))
