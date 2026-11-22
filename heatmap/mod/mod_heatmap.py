@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.7.3'
+__version__ = '0.7.4'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -802,8 +802,8 @@ P_BOX = (52, 56, 61, 255)
 P_EDGE = (96, 100, 106, 255)
 P_ON = (60, 150, 70, 255)
 P_BUTTON = (59, 63, 69, 255)
-LEGEND = (('pen', u'РїСЂРѕР±РёС‚РёРµ'), ('marginal', u'РЅР° РіСЂР°РЅРё'), ('no_pen', u'РЅРµС‚'),
-          ('ricochet', u'СЂРёРєРѕС€РµС‚'), ('no_damage', u'Р±РµР· СѓСЂРѕРЅР°'))
+LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
+          ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
 PANEL_DEFAULTS = ('enabled', 'balance') + TUNING_KEYS + ('alpha', 'hide_covered', 'best_point',
                   'show_allies', 'show_all_visible')
@@ -951,18 +951,18 @@ def render_panel(cfg, res, font, measured=None):
         hits.append(((track[0] - 5, y, track[2] + 5, y + ROW), ('slider', key, track[0], track[2])))
 
     c.rect(0, 0, W, P_HEADER, P_HEADER_BG)
-    c.text(font, PAD, mid(0, P_HEADER), u'РўРµРїР»РѕРІР°СЏ РєР°СЂС‚Р° РїСЂРѕР±РёС‚РёСЏ', P_TEXT)
+    c.text(font, PAD, mid(0, P_HEADER), u'Тепловая карта пробития', P_TEXT)
     close = (W - 34, 6, W - 8, P_HEADER - 6)
     c.box(close, P_BUTTON, P_EDGE)
     c.sign(close, 'x', P_TEXT)
     hits.append((close, ('close',)))
     y = P_HEADER + 8
 
-    toggle(y, 'enabled', u'РўРµРїР»РѕРІР°СЏ РєР°СЂС‚Р° РІРєР»СЋС‡РµРЅР°')
+    toggle(y, 'enabled', u'Тепловая карта включена')
     y += ROW
 
     # speed or quality: one slider for the grids and the pace (balance_values)
-    faster, finer = u'Р‘С‹СЃС‚СЂРµРµ', u'РџРѕРґСЂРѕР±РЅРµРµ'
+    faster, finer = u'Быстрее', u'Подробнее'
     c.text(font, PAD, mid(y, y + ROW), faster, P_TEXT)
     c.text(font, W - PAD - width(finer), mid(y, y + ROW), finer, P_TEXT)
     slider(y, 'balance', (PAD + width(faster) + 14, y + 11, W - PAD - width(finer) - 14,
@@ -970,21 +970,21 @@ def render_panel(cfg, res, font, measured=None):
     y += ROW
     parts = []
     if measured and 'fast' in measured:
-        parts.append(u'РІ РґРІРёР¶РµРЅРёРё %dx%d, %.0f СЂР°Р·/СЃ' % measured['fast'])
+        parts.append(u'в движении %dx%d, %.0f раз/с' % measured['fast'])
     if measured and 'fine' in measured:
-        parts.append(u'СЃС‚РѕСЏ %dx%d Р·Р° %.2f СЃ' % measured['fine'])
+        parts.append(u'стоя %dx%d за %.2f с' % measured['fine'])
     if parts:
         hint = u'; '.join(parts)
     elif res[0].endswith('own numbers'):
-        hint = u'С‡Р°СЃС‚СЊ С‡РёСЃРµР» Р·Р°РґР°РЅР° РІ С„Р°Р№Р»Рµ РЅР°СЃС‚СЂРѕРµРє; РїРѕР»Р·СѓРЅРѕРє РёС… СЃР±СЂРѕСЃРёС‚'
+        hint = u'часть чисел задана в файле настроек; ползунок их сбросит'
     else:
-        hint = u'Р»РµРІРµРµ вЂ” С‡Р°С‰Рµ РѕР±РЅРѕРІР»СЏРµС‚СЃСЏ РІ РґРІРёР¶РµРЅРёРё, РїСЂР°РІРµРµ вЂ” РјРµР»СЊС‡Рµ СЃРµС‚РєР°'
+        hint = u'левее — чаще обновляется в движении, правее — мельче сетка'
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
     # transparency: [-] track [+] value; the track is clicked or dragged
     percent = transparency(cfg)
-    c.text(font, PAD, mid(y, y + ROW), u'РџСЂРѕР·СЂР°С‡РЅРѕСЃС‚СЊ', P_TEXT)
+    c.text(font, PAD, mid(y, y + ROW), u'Прозрачность', P_TEXT)
     value = u'%d%%' % percent
     c.text(font, W - PAD - width(value), mid(y, y + ROW), value, P_VALUE)
     plus = (W - PAD - 46 - 24, y + 3, W - PAD - 46, y + ROW - 3)
@@ -1008,22 +1008,22 @@ def render_panel(cfg, res, font, measured=None):
         x = c.text(font, x + 27, mid(y, y + ROW), label, P_HINT) + 12
     y += ROW
 
-    toggle(y, 'hide_covered', u'РЎРєСЂС‹РІР°С‚СЊ Р·Р° СѓРєСЂС‹С‚РёСЏРјРё')
+    toggle(y, 'hide_covered', u'Скрывать за укрытиями')
     y += ROW
-    toggle(y, 'best_point', u'РџРѕРєР°Р·С‹РІР°С‚СЊ Р»СѓС‡С€СѓСЋ С‚РѕС‡РєСѓ')
+    toggle(y, 'best_point', u'Показывать лучшую точку')
     y += ROW
-    toggle(y, 'show_allies', u'РџРѕРєР°Р·С‹РІР°С‚СЊ Рё РЅР° СЃРѕСЋР·РЅРёРєР°С…')
+    toggle(y, 'show_allies', u'Показывать и на союзниках')
     y += ROW
-    toggle(y, 'show_all_visible', u'Р’СЃРµ РІРёРґРёРјС‹Рµ С‚Р°РЅРєРё')
+    toggle(y, 'show_all_visible', u'Все видимые танки')
     y += ROW
 
     y += 8
-    c.text(font, PAD, y, u'Ctrl+Shift+G вЂ” СЌС‚Рѕ РѕРєРЅРѕ, Ctrl+Shift+H вЂ” РІРєР»/РІС‹РєР»', P_HINT)
-    c.text(font, PAD, y + th + 4, u'Р’ Р±РѕСЋ РєСѓСЂСЃРѕСЂ РїРѕСЏРІР»СЏРµС‚СЃСЏ, РїРѕРєР° Р·Р°Р¶Р°С‚ Ctrl', P_HINT)
+    c.text(font, PAD, y, u'Ctrl+Shift+G — это окно, Ctrl+Shift+H — вкл/выкл', P_HINT)
+    c.text(font, PAD, y + th + 4, u'В бою курсор появляется, пока зажат Ctrl', P_HINT)
     by0 = y + 2 * th + 14
     x1 = W - PAD
-    for label, action, fill in ((u'Р—Р°РєСЂС‹С‚СЊ', ('close',), P_BUTTON),
-                                (u'РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ', ('reset',), P_BUTTON)):
+    for label, action, fill in ((u'Закрыть', ('close',), P_BUTTON),
+                                (u'По умолчанию', ('reset',), P_BUTTON)):
         bw = max(width(label) + 24, 60)
         r = (x1 - bw, by0, x1, by0 + 26)
         c.box(r, fill, P_EDGE)
