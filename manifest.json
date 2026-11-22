@@ -115,12 +115,12 @@
     "sniper_zoom": {
       "description": "Расширяет снайперский прицел: добавляет увеличение x30, x40, x50 к стандартным x2–x25",
       "dirs": [],
-      "file": "sniper_zoom_0.1.0.mtmod",
+      "file": "sniper_zoom_0.1.1.mtmod",
       "name": "Снайперский зум x50",
-      "sha256": "e45686cea586de454fd400281d5a3c11f04cb824df053eb5b51669de2d514972",
-      "size": 4938,
-      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/sniper_zoom-v0.1.0/sniper_zoom_0.1.0.mtmod",
-      "version": "0.1.0"
+      "sha256": "03bc5990bb82981f29f2b7d5e7822898a6e6770af4eac94025ab73de9d24516e",
+      "size": 5877,
+      "url": "https://github.com/f0rmat1k/tanki-mods/releases/download/sniper_zoom-v0.1.1/sniper_zoom_0.1.1.mtmod",
+      "version": "0.1.1"
     },
     "xvm": {
       "description": "Оленемер, расширенные маркеры, карусель и многое другое.",
