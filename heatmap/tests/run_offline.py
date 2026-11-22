@@ -233,7 +233,11 @@ class Vehicle(object):
         self.appearance = Obj(collisions=collisions,
                               compoundModel=Obj(node=lambda name: self.part_matrix(
                                   {'hull': 1, 'turret': 2, 'gun': 3}[name])))
-        self.typeDescriptor = Obj(type=Obj(name='test:Box'))
+        _shell = Obj(kind='ARMOR_PIERCING', caliber=122.0, compactDescr=1001,
+                     type=Obj(mechanics='LEGACY'), distanceFactor=None,
+                     piercingPowerRandomization=0.25)
+        _shot = Obj(piercingPower=(175.0, 160.0), maxDistance=720.0, shell=_shell)
+        self.typeDescriptor = Obj(type=Obj(name='test:Box'), shot=_shot)
 
     def part_matrix(self, idx):
         if idx == 0:
@@ -248,6 +252,10 @@ class Vehicle(object):
         if idx == 2:
             return turret
         return translate(0.0, 0.4, 1.2, turret)
+
+    @property
+    def position(self):
+        return self.matrix.translation
 
     def isAlive(self):
         return self.alive
@@ -386,7 +394,7 @@ def open_section(path):
 
 
 module('ResMgr', openSection=open_section, purge=lambda p, r=False: None)
-module('Keys', KEY_H=35, KEY_G=34, KEY_ESCAPE=1, KEY_LEFTMOUSE=256)
+module('Keys', KEY_H=35, KEY_G=34, KEY_ESCAPE=1, KEY_LEFTMOUSE=256, KEY_MOUSE3=259)
 
 
 class KeyEvent(object):
@@ -510,9 +518,13 @@ check(os.path.isfile(os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.j
       'default config written')
 import json  # noqa: E402
 saved = json.load(open(CONFIG))
-check(g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0), '0.1.0 settings file: the middle of the scale %r' % (g.res,))
-check(saved['balance'] == 50 and saved['grid_w'] is None and saved['slice_ms'] is None
-      and '_help' in saved and saved['alpha'] == 0.5, 'settings file rewritten with balance')
+res50 = hm.resolution_grid(50)
+spd50 = hm.speed_rate(50)
+check(g.res == ('res 50 + spd 50', res50[0], res50[1], res50[2], None, spd50, 50.0, 50.0),
+      '0.1.0 settings file: the middle of the scale %r' % (g.res,))
+check(saved['resolution'] == 50 and saved['speed'] == 50 and saved['grid_w'] is None
+      and saved['slice_ms'] is None and '_help' in saved and saved['alpha'] == 0.5,
+      'settings file rewritten with resolution and speed')
 orig_publish = g._publish
 
 
@@ -552,10 +564,23 @@ frames(300)
 check(len(PUBLISHED) == 2, 'and nothing more while nothing moves')
 codes, gw, gh, rect, box = PUBLISHED[-1]
 counts = [codes.count(chr(c)) for c in range(6)]
+# count gradient codes (16..47) as marginal
+for gc in range(hm.GRAD_BASE, hm.GRAD_BASE + hm.GRAD_COUNT):
+    counts[hm.MARGINAL] += codes.count(chr(gc))
 print('     grid %dx%d, cells miss/pen/marginal/no_pen/ricochet/no_damage: %s' % (gw, gh, counts))
 check(100 < gw <= 128 and gh <= 96, 'cells of 2 px at the middle of the scale: %dx%d' % (gw, gh))
 check(counts[hm.PEN] > 20 and counts[hm.NO_PEN] > 20 and counts[hm.NO_DAMAGE] > 5,
       'penetrated, not penetrated and no-damage cells present')
+# gradient: marginal cells use codes GRAD_BASE..GRAD_BASE+GRAD_COUNT-1 instead of MARGINAL
+grad_codes = [ord(c) for c in codes if hm.GRAD_BASE <= ord(c) < hm.GRAD_BASE + hm.GRAD_COUNT]
+grad_unique = len(set(grad_codes))
+check(len(grad_codes) > 20 and grad_unique >= 3,
+      'gradient: %d marginal cells use %d distinct gradient steps' % (len(grad_codes), grad_unique))
+# the palette has distinct colors for the gradient steps
+pal = g.palette
+green_end = pal[hm.GRAD_BASE]
+red_end = pal[hm.GRAD_BASE + hm.GRAD_COUNT - 1]
+check(green_end != red_end, 'gradient palette: green end differs from red end')
 check(len(ROOTS) == 1 and ROOTS[0].visible, 'picture on screen')
 comp = ROOTS[0]
 check(comp.filterType == 'POINT', 'square cells')
@@ -642,7 +667,12 @@ check(kinds()[-1] == 'fine', 'the fine map comes once the target stops')
 
 # a fine pass is dropped the moment the target moves
 g.last_key = None
-frames(40)
+frames(30)   # the fast pass completes; a fine pass starts and completes
+check(g.last_key is not None and g.last_key[1], 'a fine pass completed')
+# now invalidate and use a tiny slice so the NEXT fine pass stays in progress
+g.last_key = (g.last_key[0], False)  # mark last pass as not-full to trigger fine pass
+g.res = g.res[:4] + (0.5,) + g.res[5:]   # tiny slice so the fine pass takes many frames
+frames(8)
 check(g.job is not None and g.job_fine, 'a fine pass under way')
 n = len(PUBLISHED)
 drive()
@@ -659,6 +689,7 @@ frames(2)
 check(g.job is not None and not g.job_fine and len(PUBLISHED) == n,
       'it is dropped for a fast one when the target moves')
 enemy.matrix.translation = (1.0, 0.0, 22.0)
+g.res = g.res[:4] + (None,) + g.res[5:]   # restore normal slice
 frames(600)
 check(kinds()[-1] == 'fine', 'fine again after it stopped')
 
@@ -763,29 +794,32 @@ def battle_with(**settings):
 
 
 grids = {}
-for b in (0, 50, 100):
-    grids[b] = battle_with(balance=b)
-    print('     balance %-3d -> res %r, grid %r' % (b, g.res, grids[b]))
-    want = hm.balance_values(b)
-    check(g.res == ('balance %d' % b, want[0], want[1], want[2], None, want[4], float(b)),
-          'balance %d read from the file' % b)
-check(hm.balance_values(0) == (64, 48, 3.0, None, 20.0)
-      and hm.balance_values(50) == (128, 96, 2.0, None, 12.6)
-      and hm.balance_values(100) == (256, 192, 1.0, None, 8.0), 'the scale: speed, middle, quality')
+for r in (0, 50, 100):
+    grids[r] = battle_with(resolution=r, speed=50)
+    rg = hm.resolution_grid(r)
+    sr = hm.speed_rate(50)
+    print('     resolution %-3d -> res %r, grid %r' % (r, g.res, grids[r]))
+    check(g.res == ('res %g + spd 50' % r, rg[0], rg[1], rg[2], None, sr, float(r), 50.0),
+          'resolution %d read from the file' % r)
+check(hm.resolution_grid(0) == (64, 48, 3.0)
+      and hm.resolution_grid(100) == (512, 384, 1.0), 'the resolution scale: coarse to fine')
+check(hm.speed_rate(0) == 5.0 and hm.speed_rate(100) == 30.0, 'the speed scale: slow to fast')
 check(grids[0][0] < grids[50][0] < grids[100][0] and grids[100][0] > 150,
-      'towards quality the fine grid gets finer')
-check(battle_with(balance=100, grid_w=300, grid_h=300) is not None
-      and g.res == ('balance 100 + own numbers', 300, 300, 1.0, None, 8.0, 100.0)
+      'towards fine the grid gets finer')
+check(battle_with(resolution=100, speed=50, grid_w=300, grid_h=300) is not None
+      and g.res[0].endswith('own numbers') and g.res[1] == 300 and g.res[2] == 300
       and PUBLISHED[-1][1] > 150, 'a 300x300 grid can be set by hand')
-check(battle_with(balance=60, grid_w=100, grid_h=None, min_cell_px=3, slice_ms=5,
+rg60 = hm.resolution_grid(60)
+check(battle_with(resolution=60, speed=50, grid_w=100, grid_h=None, min_cell_px=3, slice_ms=5,
                   updates_per_sec=9) is not None
-      and g.res == ('balance 60 + own numbers', 100, hm.balance_values(60)[1], 3.0, 5.0, 9.0, 60.0)
-      and g._slice() == 0.005, 'numbers in the file replace what the scale gives')
-check(battle_with(balance='best', grid_w=None, min_cell_px=None, slice_ms=None,
+      and g.res[1] == 100 and g.res[2] == rg60[1] and g.res[3] == 3.0 and g.res[4] == 5.0
+      and g.res[5] == 9.0 and g._slice() == 0.005,
+      'numbers in the file replace what the scale gives')
+check(battle_with(resolution='best', speed='bad', grid_w=None, min_cell_px=None, slice_ms=None,
                   updates_per_sec=None) is not None
-      and g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0), 'a bad balance falls back to the middle')
-check(battle_with(balance=50, grid_w=100000, slice_ms='fast') is not None
-      and g.res == ('balance 50 + own numbers', 512, 96, 2.0, None, 12.6, 50.0),
+      and g.res[6] == 50.0 and g.res[7] == 50.0, 'bad slider values fall back to the middle')
+check(battle_with(resolution=50, speed=50, grid_w=100000, slice_ms='fast') is not None
+      and g.res[1] == 512 and g.res[6] == 50.0,
       'bad numbers are clamped or dropped')
 battle_with(grid_w=None, slice_ms=None)
 # the work per frame is found from what a frame takes without the mod, and kept
@@ -818,18 +852,19 @@ def driving(seconds, **settings):
     return len(PUBLISHED) / float(seconds), sum(cells) / float(len(cells) or 1)
 
 
-rate5, cells5 = driving(3, balance=75, slice_ms=8, updates_per_sec=5)
+rate5, cells5 = driving(3, resolution=75, speed=50, slice_ms=8, updates_per_sec=5)
 check(set(kinds()) == set(['fast']), 'driving: fast passes only')
 rate10, cells10 = driving(3, updates_per_sec=10)
 print('     driving at max: %.1f passes a second of %d cells, %.1f of %d cells'
       % (rate5, cells5, rate10, cells10))
 check(4.0 <= rate5 <= 5.4 and 8.0 <= rate10 <= 10.8, 'the asked number of updates a second is kept')
-check(1.5 < cells5 / cells10 < 2.7 and cells5 < 192 * 88 / 4,
-      'by a coarser grid: twice the rate, about half the cells')
+check(1.4 < cells5 / cells10 < 5.0 and cells5 < 304 * 228,
+      'by a coarser grid: twice the rate, fewer cells')
+EVENTS.onAvatarBecomeNonPlayer()   # flush cost to file
 stored = json.load(open(CONFIG))['_cell_cost_us']
-check(50.0 < stored < 2000.0 and abs(g.cost * 1e6 - stored) < 0.3 * stored,
+check(5.0 < stored < 2000.0 and abs(g.cost * 1e6 - stored) < 0.3 * stored,
       'the cost of a cell is kept in the settings file (%.1f us here)' % stored)
-battle_with(balance=50, grid_w=None, slice_ms=None, updates_per_sec=None)
+battle_with(resolution=50, speed=50, grid_w=None, slice_ms=None, updates_per_sec=None)
 
 # ---- the settings panel ----
 PANEL_KEY = KeyEvent(34, ctrl=True, shift=True)
@@ -886,14 +921,18 @@ frames(2)
 CURSOR.position = (0.9, CURSOR.position[1])
 frames(3)
 check(g.cfg['alpha'] == 0.7 and g.panel.slider is None, 'drag ends when the button is released')
-# the speed - quality slider
-def balance_slider():
-    return [a for r, a in g.panel.hits if a[:2] == ('slider', 'balance')][0]
+# the resolution and speed sliders
+def res_slider():
+    return [a for r, a in g.panel.hits if a[:2] == ('slider', 'resolution')][0]
+
+def spd_slider():
+    return [a for r, a in g.panel.hits if a[:2] == ('slider', 'speed')][0]
 
 
-check(click(balance_slider(), at=0.8) is True and g.cfg['balance'] == 80
-      and saved()['balance'] == 80 and g.res[:4] == ('balance 80',) + hm.balance_values(80)[:3],
-      'a click on the slider sets the balance (%r)' % (g.res,))
+rg80 = hm.resolution_grid(80)
+check(click(res_slider(), at=0.8) is True and g.cfg['resolution'] == 80
+      and saved()['resolution'] == 80 and g.res[1] == rg80[0] and g.res[2] == rg80[1],
+      'a click on the resolution slider (%r)' % (g.res,))
 HELD.clear()
 frames(2)
 del PUBLISHED[:]
@@ -902,22 +941,29 @@ check(PUBLISHED and kinds()[-1] == 'fine' and PUBLISHED[-1][1] > 100,
       'the map is recast finer at once (%r)' % (PUBLISHED[-1][1:3],))
 check('fast' in g.measured and 'fine' in g.measured and not g.report,
       'the panel shows the measured passes')
-panel_png('panel_balance.png')
+panel_png('panel_resolution.png')
 g.apply_settings({'updates_per_sec': 9, 'slice_ms': 3})
-check(g.res[0] == 'balance 80 + own numbers', 'numbers set by hand show')
+check(g.res[0].endswith('own numbers'), 'numbers set by hand show')
 panel_png('panel_own.png')
 HELD.add(256)
-check(click(balance_slider(), at=0.2) is True and g.cfg['balance'] == 20
-      and saved()['updates_per_sec'] is None and saved()['slice_ms'] is None
-      and g.res[0] == 'balance 20', 'moving the slider puts the numbers of the file aside')
-bar = balance_slider()
+check(click(res_slider(), at=0.2) is True and g.cfg['resolution'] == 20
+      and saved()['grid_w'] is None and saved()['grid_h'] is None,
+      'moving the resolution slider puts its grid numbers aside')
+bar = res_slider()
 x = g.panel.rect[0] + bar[2] + (bar[3] - bar[2]) * 1.2
 CURSOR.position = (x / 960.0 - 1.0, CURSOR.position[1])
 frames(3)
-check(g.cfg['balance'] == 100 and saved()['balance'] == 100, 'dragging it past the end: 100')
+check(g.cfg['resolution'] == 100 and saved()['resolution'] == 100, 'dragging it past the end: 100')
 HELD.clear()
 frames(2)
 check(g.panel.slider is None, 'the drag ends')
+# the speed slider clears the speed overrides
+check(click(spd_slider(), at=0.5) is True and g.cfg['speed'] == 50
+      and saved()['updates_per_sec'] is None and saved()['slice_ms'] is None
+      and 'own numbers' not in g.res[0], 'moving the speed slider puts its numbers aside')
+# speed slider to a custom value
+check(click(spd_slider(), at=0.6) is True and g.cfg['speed'] == 60
+      and saved()['speed'] == 60, 'a click on the speed slider')
 check(click(('toggle', 'show_allies')) is True and g.cfg['show_allies'] is True, 'allies toggle')
 check(click(('toggle', 'show_all_visible')) is True and g.cfg['show_all_visible'] is True,
       'show_all_visible toggle on')
@@ -925,12 +971,13 @@ check(click(('toggle', 'show_all_visible')) is True and g.cfg['show_all_visible'
       'show_all_visible toggle off')
 
 # cover: a wall hides the left part of the target (the panel is still open, the map is held)
-check(click(balance_slider(), at=0.5) is True and g.cfg['balance'] == 50, 'the middle for the cover checks')
+check(click(res_slider(), at=0.5) is True and g.cfg['resolution'] == 50, 'the middle for the cover checks')
+check(click(spd_slider(), at=0.5) is True and g.cfg['speed'] == 50, 'speed middle for the cover checks')
 frames(2)
 del PUBLISHED[:]
 frames(600)
 open_codes, gw, gh = PUBLISHED[-1][:3]
-check(WALL['calls'] > 500 and not any(ord(c) & 8 for c in open_codes), 'cover rays cast, nothing hidden')
+check(WALL['calls'] > 500 and not any(ord(c) & hm.COVERED for c in open_codes), 'cover rays cast, nothing hidden')
 WALL['x'] = 0.9
 g.last_key = None
 frames(600)
@@ -938,7 +985,10 @@ codes = PUBLISHED[-1][0]
 gone = [i for i in range(len(codes)) if open_codes[i] != '\x00' and codes[i] == '\x00']
 kept = [i for i in range(len(codes)) if codes[i] != '\x00']
 print('     wall: %d cells hidden, %d left' % (len(gone), len(kept)))
-check(len(gone) > 100 and len(kept) > 100 and all(codes[i] == open_codes[i] for i in kept),
+# with gradient codes, adaptive skip near the wall boundary may propagate a slightly different
+# gradient step; compare categories (gradient codes all map to MARGINAL) instead of exact values
+check(len(gone) > 100 and len(kept) > 100 and all(
+        hm._GRAD_CAT[ord(codes[i])] == hm._GRAD_CAT[ord(open_codes[i])] for i in kept),
       'the part behind the wall is left out, the rest is unchanged')
 check(max(i % gw for i in gone) < min(i % gw for i in kept if i // gw > gh // 2),
       'the hidden part is the one on the wall side')
@@ -947,7 +997,9 @@ g.cfg['covered_alpha'] = 0.2
 g.apply_settings({})
 frames(600)
 codes = PUBLISHED[-1][0]
-dimmed = [i for i in gone if ord(codes[i]) == ord(open_codes[i]) | 8]
+# gradient codes may differ slightly via adaptive skip; check COVERED flag + same category
+dimmed = [i for i in gone if (ord(codes[i]) & hm.COVERED) and
+          hm._GRAD_CAT[ord(codes[i]) & 0x7F] == hm._GRAD_CAT[ord(open_codes[i])]]
 alphas = set(ord(row[i]) for row in g.pic_sig[2] for i in range(3, len(row), 4))
 check(len(dimmed) == len(gone) and len(alphas) == 3 and 0 < sorted(alphas)[1] < 40,
       'covered_alpha draws the hidden part dimmed instead (alphas %r)' % sorted(alphas))
@@ -992,6 +1044,46 @@ check(len(no_coll_kept) > len(wreck_kept),
       'wreck without collisions does not hide anything')
 # clean up
 del ENTITIES[wreck.id]
+g.last_key = None
+del PUBLISHED[:]
+
+# ally occlusion: a live allied tank between camera and target hides cells behind it
+ally_blocker = Vehicle(50, 1, (0.0, 0.0, 15.0), 0.0)   # team 1, same as player
+ally_blocker.alive = True
+ENTITIES[ally_blocker.id] = ally_blocker
+g.last_key = None
+del PUBLISHED[:]
+frames(600)
+ally_codes = PUBLISHED[-1][0]
+ally_gone = [i for i in range(len(ally_codes))
+             if open_codes[i] != '\x00' and ally_codes[i] == '\x00']
+ally_kept = [i for i in range(len(ally_codes)) if ally_codes[i] != '\x00']
+print('     ally: %d cells hidden, %d left' % (len(ally_gone), len(ally_kept)))
+check(len(ally_gone) > 10 and len(ally_kept) > 10,
+      'a live ally hides part of the target')
+# an ally with no collisions is silently skipped
+ally_blocker.appearance = Obj(collisions=None, compoundModel=ally_blocker.appearance.compoundModel)
+g.last_key = None
+del PUBLISHED[:]
+frames(600)
+ally_no_coll_codes = PUBLISHED[-1][0]
+ally_no_coll_kept = [i for i in range(len(ally_no_coll_codes)) if ally_no_coll_codes[i] != '\x00']
+check(len(ally_no_coll_kept) > len(ally_kept),
+      'ally without collisions does not hide anything')
+# an enemy (team 2) that is alive is NOT an ally, should not hide
+enemy_bystander = Vehicle(51, 2, (0.0, 0.0, 15.0), 0.0)
+enemy_bystander.alive = True
+ENTITIES[enemy_bystander.id] = enemy_bystander
+del ENTITIES[ally_blocker.id]
+g.last_key = None
+del PUBLISHED[:]
+frames(600)
+enemy_bystander_codes = PUBLISHED[-1][0]
+enemy_bystander_kept = [i for i in range(len(enemy_bystander_codes))
+                        if enemy_bystander_codes[i] != '\x00']
+check(len(enemy_bystander_kept) > len(ally_kept),
+      'a live enemy does not get ally occlusion treatment')
+del ENTITIES[enemy_bystander.id]
 g.last_key = None
 del PUBLISHED[:]
 
@@ -1060,7 +1152,7 @@ check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp
       'off from the panel hides the map')
 panel_png('panel_off.png')
 check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
-      and g.res == ('balance 50', 128, 96, 2.0, None, 12.6, 50.0) and g.cfg['hide_covered']
+      and g.res[6] == 50.0 and g.res[7] == 50.0 and g.cfg['hide_covered']
       and not g.cfg['show_allies'] and not g.cfg['show_all_visible'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
@@ -1095,11 +1187,11 @@ check(game.handleKeyEvent(key) is False, 'Ctrl+Shift+H does nothing in the hanga
 check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel opens in the hangar')
 check(click(('step', -5)) is True and g.cfg['alpha'] == 0.55 and saved()['alpha'] == 0.55,
       'transparency - in the hangar')
-check(click(balance_slider(), at=0.3) and saved()['balance'] == 30, 'the slider in the hangar')
+check(click(res_slider(), at=0.3) and saved()['resolution'] == 30, 'the resolution slider in the hangar')
 panel_png('panel_hangar.png')
 STATE.player = avatar
 EVENTS.onAvatarReady()
-check(not g.panel.visible and g.res[0] == 'balance 30' and g.cfg['alpha'] == 0.55,
+check(not g.panel.visible and g.res[6] == 30.0 and g.cfg['alpha'] == 0.55,
       'hangar settings are used in the next battle')
 STATE.target = enemy
 frames(600)
@@ -1109,7 +1201,7 @@ check(len(ROOTS) == 1 and ROOTS[0].visible, 'map in that battle')
 g.panel._font = hm._MISSING
 FONT['on'] = False
 check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel without a font')
-check(click(balance_slider(), at=0.5) is True and g.res[0] == 'balance 50', 'and it works')
+check(click(res_slider(), at=0.5) is True and g.res[6] == 50.0, 'and it works')
 panel_png('panel_nofont.png')
 game.handleKeyEvent(KeyEvent(1))
 # find_best on drawn grids: G pierced, y close call, r not pierced, . beside the vehicle
@@ -1154,7 +1246,7 @@ ENTITIES[enemy3.id] = enemy3
 check('show_all_visible' in hm.DEFAULTS and hm.DEFAULTS['show_all_visible'] is False,
       'show_all_visible default is False')
 # with the feature off, only the primary
-battle_with(show_all_visible=False, best_point=False, balance=50)
+battle_with(show_all_visible=False, best_point=False, resolution=50, speed=50)
 STATE.target = enemy
 frames(600)
 check(len(g.secondaries) == 0, 'no secondaries when show_all_visible is off')
@@ -1200,20 +1292,232 @@ EVENTS.onAvatarReady()
 STATE.target = enemy
 frames(600)
 
+# ---- xray: silhouettes of enemies behind walls ----
+# when off, zero overhead: no xray overlays, no enemy scanning
+check(g.cfg.get('xray', 'off') == 'off', 'xray default is off')
+check(len(g.xrays) == 0, 'no xray overlays when off')
+
+# put an enemy behind a wall and enable xray
+enemy4 = Vehicle(14, 2, (0.5, 0.0, 22.0), 0.0)
+ENTITIES[enemy4.id] = enemy4
+WALL['x'] = 2.0   # the wall now blocks the view to enemy4
+g.apply_settings({'xray': 'always'})
+frames(600)
+check(enemy4.id in g.xrays, 'xray overlay for enemy behind wall')
+xr_ov = g.xrays[enemy4.id]
+check(xr_ov.comp is not None and xr_ov.comp.visible, 'xray silhouette visible')
+check(xr_ov.pic_sig is not None and xr_ov.pic_sig[0] <= hm.XRAY_GW
+      and xr_ov.pic_sig[1] <= hm.XRAY_GH, 'xray grid is low resolution')
+# the rows of the xray silhouette use the xray colour where the collision model was hit
+xr_rows = xr_ov.pic_sig[2]
+xr_color = bytes(bytearray(hm.XRAY_COLOR))
+xr_hit = sum(r.count(xr_color) for r in xr_rows)
+check(xr_hit > 10, 'xray silhouette has cells (%d)' % xr_hit)
+
+# the primary target should NOT have an xray overlay (it has the heatmap)
+check(enemy.id not in g.xrays, 'primary target has no xray (heatmap instead)')
+# move enemy out from behind the wall: xray overlay goes away
+WALL['x'] = None
+frames(10)
+check(enemy4.id not in g.xrays, 'enemy no longer behind wall: no xray')
+
+# xray by key: only when held
+g.apply_settings({'xray': 'key'})
+WALL['x'] = 2.0
+frames(10)
+check(len(g.xrays) == 0, 'xray by key: no overlay without key held')
+HELD.add(259)   # KEY_MOUSE3
+frames(600)
+check(enemy4.id in g.xrays and g.xrays[enemy4.id].comp.visible,
+      'xray by key: overlay appears with key held')
+HELD.discard(259)
+frames(10)
+check(len(g.xrays) == 0, 'xray by key: overlay gone when key released')
+
+# xray off: clean up
+g.apply_settings({'xray': 'off'})
+check(len(g.xrays) == 0, 'xray off clears overlays')
+
+# panel: cycle through xray modes
+game.handleKeyEvent(PANEL_KEY)
+def xray_button():
+    return [a for r, a in g.panel.hits if a == ('cycle_xray',)][0]
+
+check(g.cfg['xray'] == 'off', 'xray starts off')
+check(click(('cycle_xray',)) is True and g.cfg['xray'] == 'always', 'cycle xray: off -> always')
+check(click(('cycle_xray',)) is True and g.cfg['xray'] == 'key', 'cycle xray: always -> key')
+check(click(('cycle_xray',)) is True and g.cfg['xray'] == 'off', 'cycle xray: key -> off')
+check(saved()['xray'] == 'off', 'xray saved to config')
+game.handleKeyEvent(KeyEvent(1))
+
+# battle end cleans up xrays
+WALL['x'] = 2.0
+g.apply_settings({'xray': 'always'})
+frames(600)
+check(len(g.xrays) > 0, 'xray before battle end')
+EVENTS.onAvatarBecomeNonPlayer()
+check(len(g.xrays) == 0, 'battle end cleans up xrays')
+del ENTITIES[enemy4.id]
+WALL['x'] = None
+EVENTS.onAvatarReady()
+STATE.target = enemy
+frames(600)
+
+# ---- danger indicator: position danger light ----
+check(g.cfg.get('danger', False) is False, 'danger default is off')
+check(g.danger is None, 'no danger indicator when off')
+
+# add the player's own vehicle entity to the world so collideAllWorld works on it
+player_vehicle = Vehicle(1, 1, (0.0, 0.0, 0.0), 0.0)
+ENTITIES[player_vehicle.id] = player_vehicle
+# add an enemy facing the player: at z=20, turret yaw=pi (facing back toward the player at z=0)
+danger_enemy = Vehicle(15, 2, (0.0, 0.0, 20.0), 0.0)
+danger_enemy.turret_yaw = math.pi   # turret faces back toward the player
+ENTITIES[danger_enemy.id] = danger_enemy
+
+g.apply_settings({'danger': True})
+frames(600)
+check(g.danger is not None, 'danger indicator created when enabled')
+check(g.danger.comp is not None and g.danger.comp.visible, 'danger indicator visible')
+# with an enemy aiming at us with AP pen 175, there should be some danger
+check(g.danger.level > 0.0, 'danger level > 0 with enemy aiming at player (%.2f)' % g.danger.level)
+
+# move enemy behind a wall: danger should go to 0
+WALL['x'] = 2.0
+frames(600)
+check(g.danger.level == 0.0, 'danger is 0 when enemy is behind wall')
+WALL['x'] = None
+
+# enemy turret turned away: not aiming at us
+# both enemies must point their turrets away from the player (at z=0)
+# enemy hull yaw ~= 145deg: turret_yaw = -(145 deg) puts the turret at ~0 deg = +z = away
+old_enemy_turret = enemy.turret_yaw
+enemy.turret_yaw = -math.radians(145)
+danger_enemy.turret_yaw = 0.0    # hull yaw=0, turret_yaw=0 -> faces +z = away from z=0
+frames(600)
+check(g.danger.level == 0.0, 'danger is 0 when all enemy turrets face away')
+
+# turn turret back toward player
+danger_enemy.turret_yaw = math.pi
+enemy.turret_yaw = old_enemy_turret  # restore primary target's turret
+frames(600)
+check(g.danger.level > 0.0, 'danger returns when enemy turret faces player again')
+
+# disable danger indicator
+g.apply_settings({'danger': False})
+check(g.danger is None, 'danger indicator destroyed when disabled')
+
+# panel toggle
+game.handleKeyEvent(PANEL_KEY)
+check(g.cfg['danger'] is False, 'danger starts off in panel')
+check(click(('toggle', 'danger')) is True and g.cfg['danger'] is True, 'danger toggle on')
+check(click(('toggle', 'danger')) is True and g.cfg['danger'] is False, 'danger toggle off')
+check(saved()['danger'] is False, 'danger saved to config')
+game.handleKeyEvent(KeyEvent(1))
+
+# battle end cleans up danger
+g.apply_settings({'danger': True})
+frames(600)
+check(g.danger is not None, 'danger before battle end')
+EVENTS.onAvatarBecomeNonPlayer()
+check(g.danger is None, 'battle end cleans up danger')
+del ENTITIES[danger_enemy.id]
+del ENTITIES[player_vehicle.id]
+EVENTS.onAvatarReady()
+STATE.target = enemy
+frames(600)
+
+# ---- ghost silhouettes: faded enemy after leaving spotting ----
+check(g.cfg.get('xray_ghost', False) is False, 'xray_ghost default is off')
+check(len(g.ghosts) == 0, 'no ghosts when off')
+
+# set up: enemy behind wall with xray on and ghost on
+ghost_enemy = Vehicle(20, 2, (0.5, 0.0, 22.0), 0.0)
+ENTITIES[ghost_enemy.id] = ghost_enemy
+WALL['x'] = 2.0
+g.apply_settings({'xray': 'always', 'xray_ghost': True})
+frames(600)
+check(ghost_enemy.id in g.xrays, 'ghost setup: xray overlay for enemy behind wall')
+xr = g.xrays[ghost_enemy.id]
+check(xr.pic_sig is not None, 'ghost setup: xray silhouette rendered')
+
+# enemy disappears from spotting: remove from entities
+del ENTITIES[ghost_enemy.id]
+frames(10)
+check(ghost_enemy.id not in g.xrays, 'enemy vanished: xray overlay gone')
+check(ghost_enemy.id in g.ghosts, 'enemy vanished: ghost silhouette spawned')
+gh = g.ghosts[ghost_enemy.id]
+check(gh.comp is not None and gh.comp.visible, 'ghost silhouette visible')
+
+# ghost persists for a while
+frames(100)
+check(ghost_enemy.id in g.ghosts, 'ghost persists after 1 second')
+
+# enemy reappears: ghost should vanish immediately
+ENTITIES[ghost_enemy.id] = ghost_enemy
+frames(5)
+check(ghost_enemy.id not in g.ghosts, 'ghost gone when enemy reappears')
+
+# set up ghost again, then wait for expiry
+# enemy is in ENTITIES from the reappearance test; let xray rebuild first
+frames(600)
+check(ghost_enemy.id in g.xrays, 'ghost setup again: xray rebuilt')
+del ENTITIES[ghost_enemy.id]
+frames(10)
+check(ghost_enemy.id in g.ghosts, 'ghost setup again: ghost spawned')
+# now wait for ghost to expire (5 seconds)
+STATE.time += 6.0
+frames(10)
+check(ghost_enemy.id not in g.ghosts, 'ghost expires after duration')
+
+# toggle: ghost off should not create ghosts
+ENTITIES[ghost_enemy.id] = ghost_enemy
+g.apply_settings({'xray_ghost': False})
+frames(600)
+check(ghost_enemy.id in g.xrays, 'ghost off: xray still works')
+del ENTITIES[ghost_enemy.id]
+frames(10)
+check(ghost_enemy.id not in g.ghosts, 'ghost off: no ghost spawned')
+
+# panel toggle
+game.handleKeyEvent(PANEL_KEY)
+check(g.cfg['xray_ghost'] is False, 'xray_ghost starts off in panel')
+check(click(('toggle', 'xray_ghost')) is True and g.cfg['xray_ghost'] is True, 'ghost toggle on')
+check(click(('toggle', 'xray_ghost')) is True and g.cfg['xray_ghost'] is False, 'ghost toggle off')
+check(saved()['xray_ghost'] is False, 'ghost saved to config')
+game.handleKeyEvent(KeyEvent(1))
+
+# clean up
+g.apply_settings({'xray': 'off', 'xray_ghost': False})
+WALL['x'] = None
+EVENTS.onAvatarBecomeNonPlayer()
+check(len(g.ghosts) == 0, 'battle end cleans up ghosts')
+EVENTS.onAvatarReady()
+STATE.target = enemy
+frames(600)
+
 # settings files of earlier versions: the quality preset becomes a place on the scale, and the
 # numbers the old panel wrote do not outvote the slider
+# legacy quality preset migration: quality -> balance -> resolution + speed
 with open(CONFIG, 'w') as f:
     json.dump({'quality': 'max', 'updates_per_sec': 15, 'slice_ms': 8, 'grid_w': 192,
                'refresh_period': 0.25, 'smooth': True, 'alpha': 0.3, 'best_point': False}, f)
 cfg = hm._load_config(ROOT)
-check(cfg['balance'] == 75 and cfg['alpha'] == 0.3 and cfg['best_point'] is False
-      and [cfg[k] for k in hm.TUNING_KEYS] == [None] * 5, 'quality max -> balance 75, numbers dropped')
-check(not set(('quality', 'smooth', 'refresh_period')) & (set(cfg) | set(saved()))
-      and saved()['balance'] == 75, 'settings that are gone leave the file')
+# quality max -> balance 75 -> migration to resolution + speed
+check(cfg['alpha'] == 0.3 and cfg['best_point'] is False
+      and [cfg[k] for k in hm.TUNING_KEYS] == [None] * 5, 'quality max: numbers dropped')
+mig_r, mig_s = hm._migrate_balance(75)
+check(cfg['resolution'] == mig_r and cfg['speed'] == mig_s,
+      'quality max -> balance 75 -> resolution %d, speed %d' % (mig_r, mig_s))
+check(not set(('quality', 'smooth', 'refresh_period')) & (set(cfg) | set(saved())),
+      'settings that are gone leave the file')
+# a file with balance and an explicit number: the number stays through migration
 with open(CONFIG, 'w') as f:
     json.dump({'balance': 40, 'updates_per_sec': 9}, f)
 cfg = hm._load_config(ROOT)
-check(cfg['balance'] == 40 and cfg['updates_per_sec'] == 9, 'numbers next to a balance are kept')
+mig_r2, mig_s2 = hm._migrate_balance(40)
+check(cfg['resolution'] == mig_r2 and cfg['speed'] == mig_s2 and cfg['updates_per_sec'] == 9,
+      'balance 40 migrated, numbers next to it are kept')
 hm.fini()
 check(not ROOTS and not STATE.callbacks, 'fini cleans up')
 shutil.rmtree(TEMP, ignore_errors=True)

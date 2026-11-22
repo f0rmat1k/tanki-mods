@@ -97,6 +97,14 @@ MODS = {
                        u'набрано, лимит и сколько осталось',
         'dirs': ['res_mods/{client}/mods/bp_limit_cache'],
     },
+    'sniper_zoom': {
+        'version_file': 'sniper_zoom/mod/mod_sniper_zoom.py',
+        'built': 'sniper_zoom/build/sniper_zoom_{version}.mtmod',
+        'name': u'Снайперский зум x50',
+        'description': u'Расширяет снайперский прицел: добавляет увеличение x30, x40, x50 '
+                       u'к стандартным x2–x25',
+        'dirs': [],
+    },
 }
 # third-party mods: the launcher downloads their official archive, nothing is re-uploaded here
 EXTERNAL = {

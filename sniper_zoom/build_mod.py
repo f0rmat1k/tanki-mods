@@ -1,0 +1,113 @@
+"""Compile the sniper_zoom mod with Python 2.7 and pack it into sniper_zoom_<version>.mtmod.
+
+Usage: python build_mod.py [--install]      (Python 3; the mod itself is compiled by C:\\Python27)
+--install copies the package into the game's mods folder, removing older sniper_zoom packages.
+The game locks its .mtmod files while it runs, so install with the game closed.
+"""
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PY27 = r'C:\Python27\python.exe'
+GAME = r'G:\Tanki'
+MOD_ID = 'sniper_zoom'
+SOURCES = ['mod_sniper_zoom.py']
+
+META = """<root>
+\t<id>%s</id>
+\t<version>%s</version>
+\t<name>%s</name>
+\t<description>%s</description>
+</root>
+"""
+
+
+def mod_version():
+    with open(os.path.join(HERE, 'mod', 'mod_sniper_zoom.py'), encoding='utf-8') as f:
+        for line in f:
+            if line.startswith('__version__'):
+                return line.split("'")[1]
+    raise SystemExit('no __version__ in mod_sniper_zoom.py')
+
+
+def game_paths(game):
+    """(mods folder, res_mods/<client> folder) from the game's paths.xml."""
+    mods = res_mods = None
+    for p in ET.parse(os.path.join(game, 'paths.xml')).getroot().iter('Path'):
+        path = os.path.normpath(os.path.join(game, p.text.strip()))
+        if p.get('mask') == '*.mtmod':
+            mods = path
+        elif 'res_mods' in p.text and res_mods is None:
+            res_mods = path
+    if mods is None:
+        raise SystemExit('mods path not found in %s' % os.path.join(game, 'paths.xml'))
+    return mods, res_mods
+
+
+def compile27(src, dst, display_name):
+    """Python 2.7 bytecode of src; display_name is the path tracebacks in python.log show."""
+    if not os.path.isfile(PY27):
+        raise SystemExit('%s not found: the game needs Python 2.7 bytecode' % PY27)
+    code = ('import py_compile, sys; '
+            'py_compile.compile(sys.argv[1], sys.argv[2], sys.argv[3], doraise=True)')
+    subprocess.check_call([PY27, '-c', code, src, dst, display_name])
+
+
+def zip_entry(z, rel, data):
+    info = zipfile.ZipInfo(rel, date_time=(2020, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_STORED
+    z.writestr(info, data)
+
+
+def build():
+    version = mod_version()
+    out_dir = os.path.join(HERE, 'build')
+    pyc_dir = os.path.join(out_dir, 'pyc')
+    os.makedirs(pyc_dir, exist_ok=True)
+    target = os.path.join(out_dir, '%s_%s.mtmod' % (MOD_ID, version))
+    with zipfile.ZipFile(target, 'w', zipfile.ZIP_STORED) as z:
+        zip_entry(z, 'meta.xml', META % (
+            MOD_ID, version, 'Extended sniper zoom',
+            'Adds zoom steps beyond the stock x25: x30, x40, x50'))
+        for name in SOURCES:
+            pyc = os.path.join(pyc_dir, name + 'c')
+            compile27(os.path.join(HERE, 'mod', name), pyc, 'scripts/client/gui/mods/' + name)
+            with open(pyc, 'rb') as f:
+                zip_entry(z, 'res/scripts/client/gui/mods/' + name + 'c', f.read())
+    print('built %s (%d bytes)' % (target, os.path.getsize(target)))
+    return target
+
+
+def install(target, game):
+    mods, res_mods = game_paths(game)
+    old = re.compile(r'^%s_\d[\w.]*\.mtmod$' % re.escape(MOD_ID))
+    try:
+        for f in os.listdir(mods):
+            if old.match(f):
+                os.remove(os.path.join(mods, f))
+        shutil.copy2(target, mods)
+    except PermissionError as e:
+        raise SystemExit('cannot replace the package (%s): close the game and run --install again'
+                         % e)
+    print('installed %s into %s' % (os.path.basename(target), mods))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('--install', action='store_true',
+                    help='copy the package into the game')
+    ap.add_argument('--game', default=GAME, help='game folder (default %s)' % GAME)
+    a = ap.parse_args()
+    target = build()
+    if a.install:
+        install(target, a.game)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

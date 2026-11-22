@@ -27,14 +27,14 @@ the target's box on the screen every frame. There are two kinds of pass:
 the mouse only slides the picture and keeps the fine map. The cost of a cell is measured in
 every pass and kept between battles in the settings file.
 
-Speed or quality: one setting, `balance`, from 0 to 100, the slider of the settings panel.
-Towards 0 the fast map is recast more often, with a coarser grid, and the fine map is less
-fine; towards 100 the grids are finer and the fast map is recast less often (balance_values).
+Two independent sliders: `resolution` (0 coarse to 100 fine, grid detail) and `speed`
+(0 slow to 100 fast, update rate in motion). Each goes from 0 to 100 in steps of 5.
+resolution_grid() and speed_rate() map them to grid dimensions and updates per second.
 How much of a frame the passes may take is not asked: they may make a frame twice as long as
 it is without them, as measured on the frames between passes and kept between battles, but not
 bring the game below 45 frames a second (Heatmap._slice).
 For fine tuning a number in grid_w, grid_h, min_cell_px, updates_per_sec or slice_ms of the
-settings file replaces what `balance` gives; null takes it from `balance`. The file is read
+settings file replaces what the sliders give; null takes it from the slider. The file is read
 again at the start of every battle.
 
 The picture is a PNG in res_mods/<client>/mods/heatmap_cache shown with GUI.Simple. paths.xml
@@ -90,21 +90,23 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.7.4'
+__version__ = '0.13.0'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
 DEFAULTS = {
-    '_help': ('balance: 0 (speed: while something moves the map is recast more often, with a '
-              'coarser grid) to 100 (quality: finer grids, recast less often); the slider of the '
-              'settings panel, Ctrl+Shift+G. For fine tuning a number in grid_w, grid_h (up to '
-              '512), min_cell_px, updates_per_sec (1-30) or slice_ms (most milliseconds of work '
-              'per frame; null: found from the frame rate) replaces what balance gives, null '
-              'takes it from balance. Moving the slider puts null back into all five'),
+    '_help': ('resolution: 0 (coarse grid) to 100 (fine grid, up to 512x384 cells); '
+              'speed: 0 (5 updates/sec in motion) to 100 (30 updates/sec). Both sliders are in '
+              'the settings panel, Ctrl+Shift+G. For fine tuning a number in grid_w, grid_h (up '
+              'to 512), min_cell_px, updates_per_sec (1-30) or slice_ms (most milliseconds of '
+              'work per frame; null: found from the frame rate) replaces what the sliders give, '
+              'null takes it from them. Moving a slider puts null back into its numbers'),
     '_cell_cost_us': None,    # microseconds a cell costs on this computer: measured, not set
     '_frame_ms': None,        # milliseconds between frames without the mod: measured, not set
     'enabled': True,
-    'balance': 50,            # 0 speed ... 100 quality: see balance_values
+    'balance': None,           # legacy: replaced by resolution + speed; migrated on load
+    'resolution': 50,         # 0 coarse (64x48) ... 100 fine (512x384): grid detail
+    'speed': 50,              # 0 slow (5/sec) ... 100 fast (30/sec): update rate in motion
     'grid_w': None,           # most cells across the target (the fine map) ...
     'grid_h': None,           # ... and down; cells are square, a far target gets fewer
     'min_cell_px': None,      # a cell is never smaller than this on the screen
@@ -126,17 +128,23 @@ DEFAULTS = {
         'ricochet': '#880000',
         'no_damage': '#808080',
     },
+    'xray': 'off',            # enemy silhouettes behind walls: 'off', 'always', 'key'
+    'xray_key': 'MOUSE3',     # key name (Keys.KEY_*) when xray='key'; MOUSE3 = Mouse4
+    'xray_ghost': False,       # show faded ghost silhouette for enemies that disappear from spotting
+    'xray_ghost_duration': 5.0,  # seconds to show the ghost after the enemy disappears
+    'danger': False,           # danger indicator: how exposed the player is to aimed enemies
     'debug': False,
 }
 
-# the two ends of `balance`: (grid_w of the fine map, min_cell_px, updates_per_sec of the fast
-# map). The grid is only full on a target that is large on the screen: cells never get smaller
-# than min_cell_px. In the game a cell costs some 15 microseconds, so the full grid of the
-# quality end is about 0.7 s of work, and the middle of the scale about 0.2 s
-BALANCE_SPEED = (64, 3.0, 20.0)
-BALANCE_QUALITY = (256, 1.0, 8.0)
+# resolution slider: (grid_w, min_cell_px) at each end. The grid is only full on a target that
+# is large on the screen: cells never get smaller than min_cell_px
+RES_COARSE = (64, 3.0)       # resolution = 0
+RES_FINE = (512, 1.0)        # resolution = 100 (raised from 256 after the 8x optimization)
+# speed slider: updates per second of moving targets at each end
+SPEED_SLOW = 5.0              # speed = 0
+SPEED_FAST = 30.0             # speed = 100
 GRID_ASPECT = 0.75            # grid_h over grid_w
-BALANCE_STEP = 5              # the slider's step
+SLIDER_STEP = 5               # both sliders' step
 # the quality presets of 0.2 - 0.5.1 as places on that scale
 OLD_QUALITY = {'low': 15, 'medium': 30, 'high': 50, 'ultra': 60, 'max': 75}
 # settings of earlier versions that are gone
@@ -153,6 +161,23 @@ DEFAULT_IDLE_FRAME = 0.010    # seconds between frames without the mod, until it
 IDLE_WORK = 0.0005            # a frame in which the mod took less than this counts as without it
 
 # fast passes: the grid is sized to what the time between two updates pays for
+# xray: low-resolution silhouettes of enemies behind walls
+XRAY_GW, XRAY_GH = 24, 18    # fixed grid for xray silhouettes
+XRAY_COLOR = (255, 100, 30, 100)  # RGBA: semi-transparent orange
+XRAY_RATE = 2.0               # updates per second for xray silhouettes
+XRAY_MAX = 5                  # most enemies to draw xray silhouettes for
+XRAY_MODES = ('off', 'always', 'key')   # panel cycle order
+GHOST_ALPHA = 60              # alpha for ghost silhouettes (vs 100 for live xray)
+GHOST_FADE_START = 0.6        # start fading at this fraction of ghost_duration
+# danger indicator: how exposed the player is to enemies that can see and shoot them
+DANGER_RATE = 3.0             # updates per second
+DANGER_MAX_ENEMIES = 6        # most enemies to evaluate
+DANGER_AIM_COS = math.cos(math.radians(45))  # enemy turret must face within 45 deg
+DANGER_SAMPLE_N = 5           # control points on the player's collision model
+DANGER_GREEN = (0, 200, 0, 180)       # safe
+DANGER_YELLOW = (220, 200, 0, 180)    # moderate risk
+DANGER_RED = (220, 30, 0, 180)        # high risk
+
 DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the game
 FAST_FILL = 0.85              # share of that time a fast pass is planned to take
 MIN_FAST_CELLS = 200          # a fast grid is never coarser than this many cells
@@ -169,7 +194,9 @@ REFRESH_SHIFT_CUT = 0.02      # ... if the screen edge cut the box: it was cast 
 STILL_CHECK_PERIOD = 0.05     # seconds between looks whether a finished fine map still holds
 
 MISS, PEN, MARGINAL, NO_PEN, RICOCHET, NO_DAMAGE = range(6)
-COVERED = 8               # added to a cell's code: the same outcome, seen through cover
+COVERED = 128             # bit 7: the same outcome, seen through cover
+GRAD_BASE = 16            # first gradient code (marginal penetration, continuous)
+GRAD_COUNT = 32           # gradient steps: 16 = nearly PEN, 47 = nearly NO_PEN
 COVER_GAP = 0.3           # meters before the armor the cover ray stops: tracks stand on the ground
 SCENE_FLAGS = 128         # the static scene as shells and the aim meet it (AimingSystems)
 COLOR_KEYS = (None, 'pen', 'marginal', 'no_pen', 'ricochet', 'no_damage')
@@ -210,6 +237,71 @@ def _collect_wrecks(target_id):
     except Exception:
         pass
     return wrecks
+
+
+def _collect_allies(target_id):
+    """collideAllWorld callables for live allied vehicles that may occlude the target.
+
+    Returns a list of callables ``fn(a, b) -> hits``, each the collision model of a
+    living ally (same team as the player, excluding the player's own vehicle) that
+    stands between the camera and the enemy target.
+    """
+    allies = []
+    try:
+        player = BigWorld.player()
+        my_team = player.team
+        my_id = getattr(player, 'playerVehicleID', None)
+        for entity in BigWorld.entities.values():
+            if entity.id == target_id or entity.id == my_id:
+                continue
+            if entity.__class__.__name__ != 'Vehicle':
+                continue
+            if not getattr(entity, 'isAlive', lambda: True)():
+                continue
+            try:
+                if entity.publicInfo['team'] != my_team:
+                    continue
+            except Exception:
+                continue
+            app = getattr(entity, 'appearance', None)
+            if app is None:
+                continue
+            coll = getattr(app, 'collisions', None)
+            if coll is None:
+                continue
+            fn = getattr(coll, 'collideAllWorld', None)
+            if fn is not None:
+                allies.append(fn)
+    except Exception:
+        pass
+    return allies
+
+
+# ---- grid optimizations ----
+
+_spiral_cache = {}
+
+
+def _spiral_order(gw, gh):
+    """Cell indices from the grid center outward (Chebyshev distance rings).
+
+    The result is cached by (gw, gh) so the sort runs once per grid size.
+    """
+    key = (gw, gh)
+    order = _spiral_cache.get(key)
+    if order is not None:
+        return order
+    ci, cj = gw >> 1, gh >> 1
+    n = gw * gh
+    buf = [0] * n
+    for k in xrange(n):
+        i = k % gw
+        j = k // gw
+        buf[k] = (max(abs(i - ci), abs(j - cj)), k)
+    buf.sort()
+    order = [t[1] for t in buf]
+    _spiral_cache[key] = order
+    return order
 
 
 # the port of the game's shell rules, used when its own functions cannot be called:
@@ -285,7 +377,7 @@ def _load_config(root):
             # settings added since the file was written go into it, so they can be found there,
             # and settings that are gone leave it
             rewrite = bool(set(DEFAULTS) - set(user)) or bool(set(GONE_KEYS) & set(user))
-            if 'balance' not in user:
+            if 'balance' not in user and 'resolution' not in user:
                 # a file of 0.1 - 0.5.1: its quality preset becomes a place on the scale, and
                 # the numbers its panel wrote step aside, or the slider would not be heard
                 old = OLD_QUALITY.get(str(user.get('quality')).strip().lower())
@@ -293,6 +385,17 @@ def _load_config(root):
                     user['balance'] = old
                 for key in TUNING_KEYS:
                     user.pop(key, None)
+            # migrate old balance to resolution + speed (0.9.0 -> 0.10.0)
+            if 'resolution' not in user and 'speed' not in user:
+                bal = user.get('balance')
+                if bal is not None:
+                    try:
+                        r, s = _migrate_balance(float(bal))
+                        user['resolution'] = r
+                        user['speed'] = s
+                        rewrite = True
+                    except (TypeError, ValueError):
+                        pass
             for key in GONE_KEYS:
                 user.pop(key, None)
             colors = user.pop('colors', None)
@@ -309,29 +412,64 @@ def _load_config(root):
     return cfg
 
 
-def balance_values(balance):
-    """(grid_w, grid_h, min_cell_px, slice_ms, updates_per_sec) for a place on the scale from
-    0, speed, to 100, quality. The grid and the pace change by equal factors per step, the
-    smallest cell evenly; slice_ms is None: it is found from the frame rate."""
-    b = min(max(float(balance), 0.0), 100.0) / 100.0
-    (w0, cell0, rate0), (w1, cell1, rate1) = BALANCE_SPEED, BALANCE_QUALITY
+def resolution_grid(res_val):
+    """(grid_w, grid_h, min_cell_px) for a resolution slider value 0-100."""
+    b = min(max(float(res_val), 0.0), 100.0) / 100.0
+    w0, cell0 = RES_COARSE
+    w1, cell1 = RES_FINE
     grid_w = w0 * (float(w1) / w0) ** b
     return (int(round(grid_w)), int(round(grid_w * GRID_ASPECT)),
-            round(cell0 + (cell1 - cell0) * b, 2), None, round(rate0 * (rate1 / rate0) ** b, 1))
+            round(cell0 + (cell1 - cell0) * b, 2))
+
+
+def speed_rate(spd_val):
+    """updates_per_sec for a speed slider value 0-100."""
+    b = min(max(float(spd_val), 0.0), 100.0) / 100.0
+    return round(SPEED_SLOW * (SPEED_FAST / SPEED_SLOW) ** b, 1)
+
+
+def _migrate_balance(balance):
+    """Convert old balance (0-100) to (resolution, speed) slider values."""
+    b = min(max(float(balance), 0.0), 100.0) / 100.0
+    # old grid_w = 64*(256/64)^b; new grid_w = 64*(512/64)^(r/100); r = b*ln(4)/ln(8) = b*2/3
+    res = int(round(100.0 * b * math.log(4) / math.log(8)))
+    # old updates = 20*(8/20)^b; new updates = 5*(30/5)^(s/100)
+    old_rate = 20.0 * (8.0 / 20.0) ** b
+    spd = 100.0 * math.log(max(old_rate / SPEED_SLOW, 1.001)) / math.log(SPEED_FAST / SPEED_SLOW)
+    return min(max(res, 0), 100), int(round(min(max(spd, 0.0), 100.0)))
 
 
 def resolution(cfg):
-    """(label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec, balance) the
-    settings ask for: what `balance` gives, with the numbers given in the file put over it.
-    slice_ms None: the mod finds it from the frame rate."""
+    """(label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec,
+    resolution_val, speed_val) the settings ask for: what the two sliders give, with the
+    numbers given in the file put over them.  slice_ms None: found from the frame rate."""
+    # read the two sliders; fall back to balance if they are absent
+    res_val = cfg.get('resolution')
+    spd_val = cfg.get('speed')
+    if res_val is None or spd_val is None:
+        try:
+            balance = float(cfg.get('balance'))
+            mig_r, mig_s = _migrate_balance(balance)
+            if res_val is None:
+                res_val = mig_r
+            if spd_val is None:
+                spd_val = mig_s
+        except (TypeError, ValueError):
+            pass
     try:
-        balance = min(max(float(cfg.get('balance')), 0.0), 100.0)
+        res_val = min(max(float(res_val), 0.0), 100.0)
     except (TypeError, ValueError):
-        log('bad balance %r in the settings: using %s' % (cfg.get('balance'), DEFAULTS['balance']))
-        balance = float(DEFAULTS['balance'])
+        res_val = float(DEFAULTS['resolution'])
+    try:
+        spd_val = min(max(float(spd_val), 0.0), 100.0)
+    except (TypeError, ValueError):
+        spd_val = float(DEFAULTS['speed'])
+    gw, gh, cell = resolution_grid(res_val)
+    rate = speed_rate(spd_val)
+    presets = (gw, gh, cell, None, rate)
     values = []
     custom = False
-    for key, preset, (lowest, highest) in zip(TUNING_KEYS, balance_values(balance), TUNING_LIMITS):
+    for key, preset, (lowest, highest) in zip(TUNING_KEYS, presets, TUNING_LIMITS):
         value = cfg.get(key)
         if value is None or isinstance(value, bool):
             value = preset
@@ -343,8 +481,9 @@ def resolution(cfg):
                 log('bad %s %r in the settings: using %s' % (key, value, preset))
                 value = preset
         values.append(value)
-    return ('balance %g%s' % (balance, ' + own numbers' if custom else ''), int(values[0]),
-            int(values[1]), float(values[2]), values[3], float(values[4]), balance)
+    return ('res %g + spd %g%s' % (res_val, spd_val, ' + own numbers' if custom else ''),
+            int(values[0]), int(values[1]), float(values[2]), values[3], float(values[4]),
+            res_val, spd_val)
 
 
 def _save_config(root, cfg):
@@ -537,7 +676,13 @@ def shot_code(hits, mats, get_mat, full_pp, rules, lo, hi):
                 if percent <= lo:
                     return PEN
                 if percent < hi:
-                    return MARGINAL
+                    t = (percent - lo) / (hi - lo)
+                    step = int(t * (GRAD_COUNT - 1) + 0.5)
+                    if step < 0:
+                        step = 0
+                    elif step >= GRAD_COUNT:
+                        step = GRAD_COUNT - 1
+                    return GRAD_BASE + step
                 return NO_PEN
             if mat.collideOnceOnly:
                 if ignored is None:
@@ -681,9 +826,22 @@ MARK_KEEP = 0.92          # the mark stays where it is while that place scores t
 MARK_PLATEAU = 0.97       # places within this share of the best count as equally good
 MARK_REDO = 1.25          # the aim circle grew or shrank by this factor: find the mark again
 # cell code -> its worth as a hit; PEN and MARGINAL cells as places the mark may stand on
-_WEIGHTS = b''.join([chr(2 if c == PEN else 1 if c == MARGINAL else 0) for c in xrange(256)])
+def _is_grad(c):
+    base = c & 0x7F
+    return GRAD_BASE <= base < GRAD_BASE + GRAD_COUNT
+
+_WEIGHTS = b''.join([chr(2 if c == PEN else 1 if c == MARGINAL or _is_grad(c) else 0)
+                     for c in xrange(256)])
 _IS_PEN = b''.join([chr(1 if c == PEN else 0) for c in xrange(256)])
-_IS_MARGINAL = b''.join([chr(1 if c == MARGINAL else 0) for c in xrange(256)])
+_IS_MARGINAL = b''.join([chr(1 if c == MARGINAL or _is_grad(c) else 0) for c in xrange(256)])
+# adaptive skip: map each code to its category (all gradient steps -> MARGINAL)
+_GRAD_CAT = bytearray(256)
+for _c in xrange(256):
+    _base = _c & 0x7F
+    if GRAD_BASE <= _base < GRAD_BASE + GRAD_COUNT:
+        _GRAD_CAT[_c] = MARGINAL | (_c & COVERED)
+    else:
+        _GRAD_CAT[_c] = _c
 
 
 def _sum_rows(rows, h):
@@ -805,8 +963,8 @@ P_BUTTON = (59, 63, 69, 255)
 LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
-PANEL_DEFAULTS = ('enabled', 'balance') + TUNING_KEYS + ('alpha', 'hide_covered', 'best_point',
-                  'show_allies', 'show_all_visible')
+PANEL_DEFAULTS = ('enabled', 'resolution', 'speed') + TUNING_KEYS + ('alpha', 'hide_covered',
+                  'best_point', 'show_allies', 'show_all_visible', 'xray', 'xray_ghost', 'danger')
 TRANSPARENCY_STEP = 5     # percent
 
 
@@ -921,12 +1079,13 @@ def render_panel(cfg, res, font, measured=None):
     the last passes of this battle, as far as there were any.
 
     Actions: ('toggle', key), ('step', percent) of transparency, ('slider', key, x0, x1) with
-    the track's ends, for 'alpha' and 'balance', ('reset',), ('close',).
+    the track's ends, for 'alpha', 'resolution' and 'speed', ('cycle_xray',), ('reset',),
+    ('close',).
     """
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 8 + P_HINT_ROW + P_FOOTER
+    h = P_HEADER + 8 + ROW * 12 + P_HINT_ROW + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -961,13 +1120,22 @@ def render_panel(cfg, res, font, measured=None):
     toggle(y, 'enabled', u'Тепловая карта включена')
     y += ROW
 
-    # speed or quality: one slider for the grids and the pace (balance_values)
-    faster, finer = u'Быстрее', u'Подробнее'
-    c.text(font, PAD, mid(y, y + ROW), faster, P_TEXT)
-    c.text(font, W - PAD - width(finer), mid(y, y + ROW), finer, P_TEXT)
-    slider(y, 'balance', (PAD + width(faster) + 14, y + 11, W - PAD - width(finer) - 14,
-                          y + ROW - 11), res[6] / 100.0)
+    # resolution slider: grid detail
+    coarse, fine = u'Грубее', u'Детальнее'
+    c.text(font, PAD, mid(y, y + ROW), coarse, P_TEXT)
+    c.text(font, W - PAD - width(fine), mid(y, y + ROW), fine, P_TEXT)
+    slider(y, 'resolution', (PAD + width(coarse) + 14, y + 11,
+                              W - PAD - width(fine) - 14, y + ROW - 11), res[6] / 100.0)
     y += ROW
+
+    # speed slider: update rate in motion
+    slower, faster = u'Реже', u'Чаще'
+    c.text(font, PAD, mid(y, y + ROW), slower, P_TEXT)
+    c.text(font, W - PAD - width(faster), mid(y, y + ROW), faster, P_TEXT)
+    slider(y, 'speed', (PAD + width(slower) + 14, y + 11,
+                         W - PAD - width(faster) - 14, y + ROW - 11), res[7] / 100.0)
+    y += ROW
+
     parts = []
     if measured and 'fast' in measured:
         parts.append(u'в движении %dx%d, %.0f раз/с' % measured['fast'])
@@ -976,9 +1144,9 @@ def render_panel(cfg, res, font, measured=None):
     if parts:
         hint = u'; '.join(parts)
     elif res[0].endswith('own numbers'):
-        hint = u'часть чисел задана в файле настроек; ползунок их сбросит'
+        hint = u'часть чисел задана в файле настроек; ползунки их сбросят'
     else:
-        hint = u'левее — чаще обновляется в движении, правее — мельче сетка'
+        hint = u'разрешение — детальность сетки, скорость — частота обновления'
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
@@ -1015,6 +1183,25 @@ def render_panel(cfg, res, font, measured=None):
     toggle(y, 'show_allies', u'Показывать и на союзниках')
     y += ROW
     toggle(y, 'show_all_visible', u'Все видимые танки')
+    y += ROW
+
+    # xray: cycle through off / always / by key
+    xray = cfg.get('xray', 'off')
+    xray_labels = {'off': u'Выкл', 'always': u'Всегда', 'key': u'По клавише'}
+    xray_label = xray_labels.get(xray, u'Выкл')
+    c.text(font, PAD, mid(y, y + ROW), u'Силуэты за стенами:', P_TEXT)
+    bw = max(width(xray_label) + 16, 60) if font else 60
+    r = (W - PAD - bw, y + 5, W - PAD, y + 25)
+    c.box(r, P_VALUE if xray != 'off' else P_BOX, P_EDGE)
+    c.text(font, r[0] + (bw - width(xray_label)) // 2, mid(y, y + ROW), xray_label,
+           P_TEXT if xray != 'off' else P_HINT)
+    hits.append(((0, y, W, y + ROW), ('cycle_xray',)))
+    y += ROW
+
+    toggle(y, 'xray_ghost', u'Призрак после засвета')
+    y += ROW
+
+    toggle(y, 'danger', u'Индикатор опасности')
     y += ROW
 
     y += 8
@@ -1239,6 +1426,13 @@ class Panel(object):
             changes = self._slider_changes(x)
             if self.drag_cb is None:
                 self.drag_cb = BigWorld.callback(0.0, self._drag_step)
+        elif kind == 'cycle_xray':
+            cur = cfg.get('xray', 'off')
+            try:
+                idx = list(XRAY_MODES).index(cur)
+            except ValueError:
+                idx = -1
+            changes = {'xray': XRAY_MODES[(idx + 1) % len(XRAY_MODES)]}
         elif kind == 'reset':
             changes = dict((key, DEFAULTS[key]) for key in PANEL_DEFAULTS)
         else:
@@ -1251,10 +1445,12 @@ class Panel(object):
         percent = (x - x0) * 100.0 / (x1 - x0)
         if key == 'alpha':
             return {'alpha': alpha_of(percent)}
-        # the slider speaks for all the numbers: ones put into the file by hand step aside
-        changes = dict.fromkeys(TUNING_KEYS)
-        changes[key] = min(max(int(round(percent / BALANCE_STEP)) * BALANCE_STEP, 0), 100)
-        return changes
+        val = min(max(int(round(percent / SLIDER_STEP)) * SLIDER_STEP, 0), 100)
+        if key == 'resolution':
+            return {'resolution': val, 'grid_w': None, 'grid_h': None, 'min_cell_px': None}
+        if key == 'speed':
+            return {'speed': val, 'slice_ms': None, 'updates_per_sec': None}
+        return {key: val}
 
     def _drag_step(self):
         """Every frame while the button is held on the track: the knob follows the cursor."""
@@ -1493,6 +1689,7 @@ class SecondaryOverlay(object):
         cover = bool(owner.cfg['hide_covered']) and not owner.cover_failed
         scene_fn, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
         wreck_fns = _collect_wrecks(target.id) if cover else []
+        ally_fns = _collect_allies(target.id) if cover else []
         covered_code = COVERED if owner.palette[COVERED + PEN][3:] != b'\x00' else None
         get_mat = target.getMatinfo
         mats = {}
@@ -1570,6 +1767,14 @@ class SecondaryOverlay(object):
                                             break
                                     except Exception:
                                         pass
+                            if not hidden:
+                                for afn in ally_fns:
+                                    try:
+                                        if afn(cam_a, cam_b):
+                                            hidden = True
+                                            break
+                                    except Exception:
+                                        pass
                             if hidden:
                                 code = MISS if covered_code is None else code | covered_code
                     codes[row + i] = code
@@ -1585,6 +1790,7 @@ class SecondaryOverlay(object):
                         return
                     if cover:
                         wreck_fns = _collect_wrecks(target.id)
+                        ally_fns = _collect_allies(target.id)
                     now = Math.Matrix(target.matrix)
                     if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
                         drift = Math.Matrix(base_inv)
@@ -1596,13 +1802,694 @@ class SecondaryOverlay(object):
         self.last_key = done
 
 
+# ---- xray: silhouettes of enemies behind walls ----
+
+class XrayOverlay(object):
+    """A low-resolution solid-colour silhouette of an enemy behind a wall.
+
+    No penetration analysis -- just show the outline so the player knows which way
+    the enemy faces.  The grid is XRAY_GW x XRAY_GH at most, and the raycast goes
+    against the target's collision model.
+    """
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.comp = None
+        self.pic = None           # (entity_id, (left, top, w, h) clip, box)
+        self.pic_sig = None
+        self.counter = 0
+        self.files = []
+        self.next_pass = 0.0
+
+    # ---- files and picture ----
+
+    def _write_png(self, png):
+        owner = self.owner
+        self.counter += 1
+        name = 'hm_xr%d_%d.png' % (os.getpid(), self.counter)
+        with open(os.path.join(owner.cache_dir, name), 'wb') as f:
+            f.write(png)
+        self.files.append(name)
+        while len(self.files) > 2:
+            try:
+                os.remove(os.path.join(owner.cache_dir, self.files.pop(0)))
+            except OSError:
+                pass
+        try:
+            ResMgr.purge(owner.cache_vfs, True)
+        except Exception:
+            pass
+        return '%s/%s' % (owner.cache_vfs, name)
+
+    def _component(self, tex):
+        c = self.comp
+        if c is not None:
+            c.textureName = tex
+            return c
+        S = GUI.Simple
+        c = self.comp = S(tex)
+        c.materialFX = S.eMaterialFX.BLEND
+        c.widthMode = c.heightMode = S.eSizeMode.PIXEL
+        c.horizontalPositionMode = c.verticalPositionMode = S.ePositionMode.CLIP
+        c.horizontalAnchor = S.eHAnchor.LEFT
+        c.verticalAnchor = S.eVAnchor.TOP
+        try:
+            c.filterType = S.eFilterType.POINT
+        except Exception:
+            pass
+        c.visible = False
+        GUI.addRoot(c)
+        return c
+
+    def publish(self, target, gw, gh, box):
+        """Raycast the target and draw a solid-colour silhouette."""
+        view = View()
+        sw, sh = GUI.screenResolution()[:2]
+        x0, y0 = max(box[0], -1.0), max(box[1], -1.0)
+        x1, y1 = min(box[2], 1.0), min(box[3], 1.0)
+        w_px, h_px = (x1 - x0) * 0.5 * sw, (y1 - y0) * 0.5 * sh
+        if w_px < 2.0 or h_px < 2.0:
+            self._hide()
+            return
+        cell = max(w_px / gw, h_px / gh)
+        gw = max(1, min(gw, int(math.ceil(w_px / cell - 1e-6))))
+        gh = max(1, min(gh, int(math.ceil(h_px / cell - 1e-6))))
+        cw, ch = cell * 2.0 / sw, cell * 2.0 / sh
+        left = (x0 + x1) * 0.5 - gw * cw * 0.5
+        top = (y0 + y1) * 0.5 + gh * ch * 0.5
+
+        corners = target_corners(target)
+        n = float(len(corners))
+        center_x = sum(c[0] for c in corners) / n
+        center_y = sum(c[1] for c in corners) / n
+        center_z = sum(c[2] for c in corners) / n
+        radius = math.sqrt(max((c[0] - center_x) ** 2 + (c[1] - center_y) ** 2
+                                + (c[2] - center_z) ** 2 for c in corners))
+        cx, cy, cz = view.pos
+        cam_dist = math.sqrt((center_x - cx) ** 2 + (center_y - cy) ** 2
+                              + (center_z - cz) ** 2)
+        t0 = max(view.near, cam_dist - radius - 0.5)
+        t1 = cam_dist + radius + 0.5
+
+        rx, ry, rz = view.right
+        ux, uy, uz = view.up
+        fx, fy, fz = view.fwd
+        tan_x, tan_y = view.tan_x, view.tan_y
+        V3, sqrt = Math.Vector3, math.sqrt
+
+        try:
+            collide = target.appearance.collisions.collideAllWorld
+        except (AttributeError, TypeError):
+            self._hide()
+            return
+
+        color = bytes(bytearray(XRAY_COLOR))
+        empty = bytes(bytearray((0, 0, 0, 0)))
+        rows = []
+        for j in xrange(gh):
+            ny = (top - (j + 0.5) * ch) * tan_y
+            ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
+            row = []
+            for i in xrange(gw):
+                nx = (left + (i + 0.5) * cw) * tan_x
+                dx, dy, dz = ax + rx * nx, ay + ry * nx, az + rz * nx
+                k = 1.0 / sqrt(dx * dx + dy * dy + dz * dz)
+                dx *= k; dy *= k; dz *= k
+                a = V3(cx + dx * t0, cy + dy * t0, cz + dz * t0)
+                b = V3(cx + dx * t1, cy + dy * t1, cz + dz * t1)
+                row.append(color if collide(a, b) else empty)
+            rows.append(b''.join(row))
+
+        if not any(any(bytearray(r)) for r in rows):
+            self.pic = None
+            self._hide()
+            return
+
+        sig = (gw, gh, rows)
+        if sig != self.pic_sig or self.comp is None:
+            self._component(self._write_png(png_rgba(gw, gh, rows)))
+            self.pic_sig = sig
+        rect = (left, top, gw * cw, gh * ch)
+        self.pic = (target.id, rect, box)
+        self._place(box)
+
+    def _place(self, box):
+        c = self.comp
+        if c is None or self.pic is None:
+            return
+        _, (left, top, w, h), then = self.pic
+        tw, th = then[2] - then[0], then[3] - then[1]
+        if tw <= 0.0 or th <= 0.0:
+            return
+        kx, ky = (box[2] - box[0]) / tw, (box[3] - box[1]) / th
+        x = box[0] + (left - then[0]) * kx
+        y = box[3] + (top - then[3]) * ky
+        sw, sh = GUI.screenResolution()[:2]
+        c.position = (x, y, 1.0)
+        c.width, c.height = w * kx * 0.5 * sw, h * ky * 0.5 * sh
+        c.visible = True
+
+    def _hide(self):
+        if self.comp is not None:
+            self.comp.visible = False
+
+    def destroy(self):
+        owner = self.owner
+        if self.comp is not None:
+            try:
+                GUI.delRoot(self.comp)
+            except Exception:
+                pass
+            self.comp = None
+        for name in self.files:
+            try:
+                os.remove(os.path.join(owner.cache_dir, name))
+            except OSError:
+                pass
+        self.files = []
+        self.pic = self.pic_sig = None
+
+
+class GhostSilhouette(object):
+    """A faded silhouette of an enemy that just left spotting, extrapolated along its last velocity."""
+
+    def __init__(self, owner, xray_overlay, last_pos, velocity, spawn_time):
+        self.owner = owner
+        self.comp = None
+        self.files = []
+        self.counter = 0
+        self.last_pos = last_pos       # Math.Vector3: position when the enemy vanished
+        self.velocity = velocity       # Math.Vector3: velocity at that moment
+        self.spawn_time = spawn_time   # BigWorld.time() when ghost was created
+        self.pic_rows = None           # cached pixel rows from the xray overlay
+        self.pic_gw = 0
+        self.pic_gh = 0
+        self.pic_sig = None
+        if xray_overlay.pic_sig is not None:
+            self.pic_gw = xray_overlay.pic_sig[0]
+            self.pic_gh = xray_overlay.pic_sig[1]
+            self.pic_rows = xray_overlay.pic_sig[2]
+
+    def _write_png(self, png):
+        owner = self.owner
+        self.counter += 1
+        name = 'hm_gh%d_%d.png' % (os.getpid(), self.counter)
+        with open(os.path.join(owner.cache_dir, name), 'wb') as f:
+            f.write(png)
+        self.files.append(name)
+        while len(self.files) > 2:
+            try:
+                os.remove(os.path.join(owner.cache_dir, self.files.pop(0)))
+            except OSError:
+                pass
+        try:
+            ResMgr.purge(owner.cache_vfs, True)
+        except Exception:
+            pass
+        return '%s/%s' % (owner.cache_vfs, name)
+
+    def _component(self, tex):
+        c = self.comp
+        if c is not None:
+            c.textureName = tex
+            return c
+        S = GUI.Simple
+        c = self.comp = S(tex)
+        c.materialFX = S.eMaterialFX.BLEND
+        c.widthMode = c.heightMode = S.eSizeMode.PIXEL
+        c.horizontalPositionMode = c.verticalPositionMode = S.ePositionMode.CLIP
+        c.horizontalAnchor = S.eHAnchor.LEFT
+        c.verticalAnchor = S.eVAnchor.TOP
+        try:
+            c.filterType = S.eFilterType.POINT
+        except Exception:
+            pass
+        c.visible = False
+        GUI.addRoot(c)
+        return c
+
+    def extrapolated_pos(self, now):
+        dt = now - self.spawn_time
+        vx, vy, vz = self.velocity
+        return Math.Vector3(self.last_pos[0] + vx * dt,
+                            self.last_pos[1] + vy * dt,
+                            self.last_pos[2] + vz * dt)
+
+    def update(self, now):
+        cfg = self.owner.cfg
+        duration = float(cfg.get('xray_ghost_duration', 5.0))
+        elapsed = now - self.spawn_time
+        if elapsed >= duration or self.pic_rows is None:
+            self._hide()
+            return False
+        fade_start = duration * GHOST_FADE_START
+        if elapsed > fade_start:
+            alpha = int(GHOST_ALPHA * (1.0 - (elapsed - fade_start) / (duration - fade_start)))
+        else:
+            alpha = GHOST_ALPHA
+        if alpha < 5:
+            self._hide()
+            return False
+        ghost_pos = self.extrapolated_pos(now)
+        view = View()
+        half_h = 2.0
+        corners = [(ghost_pos[0] + dx, ghost_pos[1] + dy, ghost_pos[2] + dz)
+                    for dx in (-2.0, 2.0) for dy in (0.0, half_h * 2) for dz in (-3.5, 3.5)]
+        box = view.box(corners)
+        if box is None or box[2] < -1.5 or box[0] > 1.5 or box[3] < -1.5 or box[1] > 1.5:
+            self._hide()
+            return True
+        gw, gh = self.pic_gw, self.pic_gh
+        ghost_color = (XRAY_COLOR[0], XRAY_COLOR[1], XRAY_COLOR[2], alpha)
+        gc = bytes(bytearray(ghost_color))
+        empty = bytes(bytearray((0, 0, 0, 0)))
+        orig_color = bytes(bytearray(XRAY_COLOR))
+        rows = []
+        for row in self.pic_rows:
+            new_row = []
+            for px in range(0, len(row), 4):
+                pixel = row[px:px + 4]
+                if pixel == orig_color:
+                    new_row.append(gc)
+                else:
+                    new_row.append(empty)
+            rows.append(b''.join(new_row))
+        sig = (gw, gh, alpha)
+        if sig != self.pic_sig or self.comp is None:
+            self._component(self._write_png(png_rgba(gw, gh, rows)))
+            self.pic_sig = sig
+        sw, sh = GUI.screenResolution()[:2]
+        bw = (box[2] - box[0]) * 0.5 * sw
+        bh = (box[3] - box[1]) * 0.5 * sh
+        c = self.comp
+        c.position = (box[0], box[3], 1.0)
+        c.width, c.height = bw, bh
+        c.visible = True
+        return True
+
+    def _hide(self):
+        if self.comp is not None:
+            self.comp.visible = False
+
+    def destroy(self):
+        owner = self.owner
+        if self.comp is not None:
+            try:
+                GUI.delRoot(self.comp)
+            except Exception:
+                pass
+            self.comp = None
+        for name in self.files:
+            try:
+                os.remove(os.path.join(owner.cache_dir, name))
+            except OSError:
+                pass
+        self.files = []
+        self.pic_rows = self.pic_sig = None
+
+
+def _is_behind_wall(entity, view):
+    """True if the static scene blocks the line from the camera to the entity's center."""
+    try:
+        pos = entity.position
+        vp = view.pos
+        a = Math.Vector3(vp[0], vp[1], vp[2])
+        b = Math.Vector3(pos.x, pos.y + 1.0, pos.z)   # roughly center mass
+        return BigWorld.collideSegment(BigWorld.player().spaceID, a, b, SCENE_FLAGS) is not None
+    except Exception:
+        return False
+
+
+def _xray_key_code(cfg):
+    """The key code for the xray hold-to-show key, or None."""
+    name = cfg.get('xray_key', 'MOUSE3')
+    try:
+        return getattr(Keys, 'KEY_' + str(name).upper())
+    except (AttributeError, TypeError):
+        return None
+
+
+# ---- danger indicator ----
+
+def _enemy_aims_at_player(entity, player_pos):
+    """True if the enemy's turret faces towards the player within DANGER_AIM_COS (45 deg)."""
+    try:
+        model = entity.appearance.compoundModel
+        turret = model.node('turret')
+        if turret is None:
+            return False
+        m = Math.Matrix(turret)
+        fwd = m.applyToAxis(2)
+        dx = player_pos[0] - m.translation.x
+        dy = player_pos[1] - m.translation.y
+        dz = player_pos[2] - m.translation.z
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if dist < 0.1:
+            return True
+        cos = (dx * fwd.x + dy * fwd.y + dz * fwd.z) / dist
+        return cos >= DANGER_AIM_COS
+    except Exception:
+        # if we cannot read the turret, assume the enemy is a threat if it has line of sight
+        return True
+
+
+def _player_collide_fn(player):
+    """The collideAllWorld callable for the player's own vehicle, or None."""
+    try:
+        vid = player.playerVehicleID
+        entity = BigWorld.entities[vid]
+        app = entity.appearance
+        if app is None or app.collisions is None:
+            return None, None
+        return entity, app.collisions.collideAllWorld
+    except Exception:
+        return None, None
+
+
+def _sample_player_points(entity):
+    """N world-space sample points on the player's collision model, spread across hull and turret."""
+    points = []
+    try:
+        base = Math.Matrix(entity.matrix)
+        app = entity.appearance
+        collisions = app.collisions
+        model = app.compoundModel
+        for idx, node_name in PARTS[:3]:    # chassis, hull, turret (skip gun)
+            try:
+                if node_name is None:
+                    matrix = base
+                else:
+                    node = model.node(node_name)
+                    if node is None:
+                        continue
+                    matrix = Math.Matrix(node)
+                bb = collisions.getBoundingBox(idx)
+                lo, hi = bb[0], bb[1]
+                cx = (lo[0] + hi[0]) * 0.5
+                cy = (lo[1] + hi[1]) * 0.5
+                cz = (lo[2] + hi[2]) * 0.5
+                p = matrix.applyPoint(Math.Vector3(cx, cy, cz))
+                points.append((p.x, p.y, p.z))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not points:
+        try:
+            pos = entity.position
+            points = [(pos.x, pos.y + 1.0, pos.z)]
+        except Exception:
+            pass
+    return points
+
+
+def _danger_pen_check(enemy, player_entity, player_collide, sample_points):
+    """How threatening *enemy* is to the player: 0.0 (safe) to 1.0 (pens everything).
+
+    Casts rays from the enemy's gun position through the sample points on the player's
+    collision model and checks whether the enemy's default shell penetrates.
+    """
+    try:
+        shot = enemy.typeDescriptor.shot
+    except Exception:
+        return 0.0
+    try:
+        e_pos = enemy.position
+        ex, ey, ez = e_pos.x, e_pos.y + 2.0, e_pos.z   # rough gun height
+    except Exception:
+        return 0.0
+    # distance from enemy to player center
+    try:
+        p_pos = player_entity.position
+        dist = math.sqrt((ex - p_pos.x) ** 2 + (ey - p_pos.y) ** 2 + (ez - p_pos.z) ** 2)
+    except Exception:
+        dist = 200.0
+    pen_mm = pen_at(shot, dist)
+    if pen_mm <= 0.0:
+        return 0.0
+    V3 = Math.Vector3
+    hits_total = 0
+    pens = 0
+    try:
+        get_mat = player_entity.getMatinfo
+    except Exception:
+        return 0.0
+    for px, py, pz in sample_points:
+        dx, dy, dz = px - ex, py - ey, pz - ez
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length < 0.1:
+            continue
+        # cast from behind the enemy position through the sample point
+        a = V3(ex - dx * 0.1, ey - dy * 0.1, ez - dz * 0.1)
+        b = V3(px + dx * 0.5, py + dy * 0.5, pz + dz * 0.5)
+        ray_hits = player_collide(a, b)
+        if not ray_hits:
+            continue
+        hits_total += 1
+        # simplified penetration check: first hit only
+        h = ray_hits[0]
+        cos = h[1]
+        if cos < 1e-05:
+            cos = 1e-05
+        kind, part = h[2], h[3]
+        try:
+            mat = get_mat(part, kind)
+        except Exception:
+            mat = None
+        if mat is None:
+            continue
+        armor = mat.armor
+        if armor is None:
+            continue
+        if not mat.useHitAngle:
+            cos = 1.0
+        effective = armor / cos
+        if pen_mm >= effective:
+            pens += 1
+    if hits_total == 0:
+        return 0.0
+    return float(pens) / float(hits_total)
+
+
+class DangerIndicator(object):
+    """A coloured bar on the left of the screen showing how exposed the player is."""
+
+    BAR_W = 16       # pixels wide
+    BAR_H = 120      # pixels tall
+    BORDER = 2       # black border around the bar
+    BAR_X = 24       # pixels from the left edge
+    BAR_Y_SHARE = 0.6  # share of screen height from the top
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.comp = None      # the coloured bar
+        self.bg_comp = None   # black border behind the bar
+        self.files = []
+        self.pic_sig = None
+        self.bg_sig = None
+        self.level = 0.0        # 0..1 aggregate danger
+        self.next_update = 0.0
+
+    def _write_png(self, png):
+        owner = self.owner
+        counter = owner.counter
+        owner.counter += 1
+        name = 'hm_dg%03d.png' % (counter % 1000)
+        path = os.path.join(owner.cache_dir, name)
+        with open(path, 'wb') as f:
+            f.write(png)
+        self.files.append(name)
+        return '%s/%s' % (owner.cache_vfs, name)
+
+    def _make_comp(self, tex):
+        S = GUI.Simple
+        c = S(tex)
+        c.materialFX = S.eMaterialFX.BLEND
+        c.widthMode = c.heightMode = S.eSizeMode.PIXEL
+        c.horizontalPositionMode = c.verticalPositionMode = S.ePositionMode.CLIP
+        c.horizontalAnchor = S.eHAnchor.LEFT
+        c.verticalAnchor = S.eVAnchor.TOP
+        try:
+            c.filterType = S.eFilterType.POINT
+        except Exception:
+            pass
+        c.visible = False
+        GUI.addRoot(c)
+        return c
+
+    def _component(self, tex):
+        c = self.comp
+        if c is not None:
+            c.textureName = tex
+            return c
+        c = self.comp = self._make_comp(tex)
+        return c
+
+    def _bg_component(self, tex):
+        c = self.bg_comp
+        if c is not None:
+            c.textureName = tex
+            return c
+        c = self.bg_comp = self._make_comp(tex)
+        return c
+
+    def update(self, player, now):
+        """Evaluate the danger level and show the bar."""
+        if now < self.next_update:
+            return
+        self.next_update = now + 1.0 / DANGER_RATE
+        player_entity, player_collide = _player_collide_fn(player)
+        if player_entity is None:
+            self._hide()
+            return
+        try:
+            p_pos = player_entity.position
+            player_pos = (p_pos.x, p_pos.y + 1.0, p_pos.z)
+        except Exception:
+            self._hide()
+            return
+        sample_points = _sample_player_points(player_entity)
+        if not sample_points:
+            self._hide()
+            return
+        # find threatening enemies
+        threats = []
+        try:
+            space = player.spaceID
+            my_team = player.team
+            my_id = getattr(player, 'playerVehicleID', None)
+            entities = BigWorld.entities.values()
+        except Exception:
+            self._hide()
+            return
+        for entity in entities:
+            if len(threats) >= DANGER_MAX_ENEMIES:
+                break
+            try:
+                if entity.id == my_id:
+                    continue
+                if entity.__class__.__name__ != 'Vehicle':
+                    continue
+                if not getattr(entity, 'isStarted', True) or not entity.isAlive():
+                    continue
+                if entity.publicInfo['team'] == my_team:
+                    continue
+                app = getattr(entity, 'appearance', None)
+                if app is None or getattr(app, 'collisions', None) is None:
+                    continue
+            except Exception:
+                continue
+            # line of sight: static scene must not block the ray
+            try:
+                e_pos = entity.position
+                a = Math.Vector3(e_pos.x, e_pos.y + 2.0, e_pos.z)
+                b = Math.Vector3(player_pos[0], player_pos[1], player_pos[2])
+                if BigWorld.collideSegment(space, a, b, SCENE_FLAGS) is not None:
+                    continue
+            except Exception:
+                continue
+            # turret aimed roughly at the player
+            if not _enemy_aims_at_player(entity, player_pos):
+                continue
+            threats.append(entity)
+        if not threats:
+            self.level = 0.0
+            self._show_bar()
+            return
+        # aggregate danger
+        max_pen = 0.0
+        for enemy in threats:
+            d = _danger_pen_check(enemy, player_entity, player_collide, sample_points)
+            if d > max_pen:
+                max_pen = d
+        # scale: number of threats matters too
+        n = len(threats)
+        self.level = min(1.0, max_pen * 0.7 + min(n, 3) / 3.0 * 0.3)
+        self._show_bar()
+
+    def _show_bar(self):
+        level = self.level
+        if level < 0.01:
+            self._hide()
+            return
+        if level < 0.3:
+            color = DANGER_GREEN
+        elif level < 0.65:
+            t = (level - 0.3) / 0.35
+            color = (int(DANGER_GREEN[0] + (DANGER_YELLOW[0] - DANGER_GREEN[0]) * t),
+                     int(DANGER_GREEN[1] + (DANGER_YELLOW[1] - DANGER_GREEN[1]) * t),
+                     int(DANGER_GREEN[2] + (DANGER_YELLOW[2] - DANGER_GREEN[2]) * t),
+                     DANGER_GREEN[3])
+        else:
+            t = min((level - 0.65) / 0.35, 1.0)
+            color = (int(DANGER_YELLOW[0] + (DANGER_RED[0] - DANGER_YELLOW[0]) * t),
+                     int(DANGER_YELLOW[1] + (DANGER_RED[1] - DANGER_YELLOW[1]) * t),
+                     int(DANGER_YELLOW[2] + (DANGER_RED[2] - DANGER_YELLOW[2]) * t),
+                     DANGER_RED[3])
+        w, h, b = self.BAR_W, self.BAR_H, self.BORDER
+        bw, bh = w + b * 2, h + b * 2
+        sw, sh = GUI.screenResolution()[:2]
+        x = -1.0 + self.BAR_X * 2.0 / sw
+        y = 1.0 - self.BAR_Y_SHARE * 2.0
+        # black background border
+        bg_sig = (bw, bh)
+        if bg_sig != self.bg_sig or self.bg_comp is None:
+            bg_color = (0, 0, 0, 200)
+            bg_pixel = bytes(bytearray(bg_color))
+            bg_rows = [bg_pixel * bw] * bh
+            self._bg_component(self._write_png(png_rgba(bw, bh, bg_rows)))
+            self.bg_sig = bg_sig
+        bg = self.bg_comp
+        bg.position = (x, y, 1.0)
+        bg.width, bg.height = bw, bh
+        bg.visible = True
+        # coloured bar on top
+        pixel = bytes(bytearray(color))
+        rows = [pixel * w] * h
+        sig = (w, h, color)
+        if sig != self.pic_sig or self.comp is None:
+            self._component(self._write_png(png_rgba(w, h, rows)))
+            self.pic_sig = sig
+        bx = -1.0 + (self.BAR_X + b) * 2.0 / sw
+        by = y - b * 2.0 / sh
+        c = self.comp
+        c.position = (bx, by, 0.9)
+        c.width, c.height = w, h
+        c.visible = True
+
+    def _hide(self):
+        if self.comp is not None:
+            self.comp.visible = False
+        if self.bg_comp is not None:
+            self.bg_comp.visible = False
+
+    def destroy(self):
+        for c in (self.comp, self.bg_comp):
+            if c is not None:
+                try:
+                    GUI.delRoot(c)
+                except Exception:
+                    pass
+        self.comp = None
+        self.bg_comp = None
+        owner = self.owner
+        for name in self.files:
+            try:
+                os.remove(os.path.join(owner.cache_dir, name))
+            except OSError:
+                pass
+        self.files = []
+        self.pic_sig = None
+        self.bg_sig = None
+
+
 # ---- the mod ----
 
 class Heatmap(object):
     def __init__(self):
         self.root = _game_root()
         self.cfg = _load_config(self.root)
-        # (label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec, balance)
+        # (label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec, res_val, spd_val)
         self.res = resolution(self.cfg)
         self.res_mods = _res_mods_dir(self.root)
         self.cache_vfs = 'mods/%s_cache' % MOD_ID
@@ -1655,6 +2542,10 @@ class Heatmap(object):
         self.panel = Panel(self)
         self.secondaries = {}     # entity id -> SecondaryOverlay
         self._sec_robin = 0       # round-robin index for time-slicing among secondaries
+        self.xrays = {}           # entity id -> XrayOverlay (enemies behind walls)
+        self._xray_robin = 0
+        self.ghosts = {}          # entity id -> GhostSilhouette (faded after leaving spotting)
+        self.danger = None        # DangerIndicator (position danger light)
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
     # ---- files ----
@@ -1707,22 +2598,41 @@ class Heatmap(object):
     # ---- picture ----
 
     def _make_palette(self):
-        """RGBA of every cell code; the codes from COVERED on are the dimmed ones."""
+        """RGBA of every cell code; codes COVERED+ are the dimmed ones, GRAD_BASE+ the gradient."""
         alpha = max(0.0, min(1.0, float(self.cfg['alpha']))) * 255
         try:
             dim = max(0.0, min(1.0, float(self.cfg['covered_alpha'])))
         except (TypeError, ValueError):
             dim = 0.0
         colors = self.cfg['colors']
-        pal = []
+        pen_rgb = _rgb(colors.get('pen'), _rgb(DEFAULTS['colors']['pen'], (0, 255, 0)))
+        mar_rgb = _rgb(colors.get('marginal'), _rgb(DEFAULTS['colors']['marginal'], (255, 255, 0)))
+        nop_rgb = _rgb(colors.get('no_pen'), _rgb(DEFAULTS['colors']['no_pen'], (255, 0, 0)))
+        trans = b'\x00\x00\x00\x00'
+        pal = [trans] * 256
         for share in (1.0, dim):
-            for key in COLOR_KEYS:
+            offset = 0 if share == 1.0 else COVERED
+            a = int(alpha * share)
+            for idx, key in enumerate(COLOR_KEYS):
                 if key is None:
-                    pal.append(b'\x00\x00\x00\x00')
+                    pal[offset + idx] = trans
                 else:
                     r, g, b = _rgb(colors.get(key), _rgb(DEFAULTS['colors'][key], (255, 0, 255)))
-                    pal.append(struct.pack('4B', r, g, b, int(alpha * share)))
-            pal.extend([b'\x00\x00\x00\x00'] * (COVERED - len(COLOR_KEYS)))
+                    pal[offset + idx] = struct.pack('4B', r, g, b, a)
+            # gradient: PEN color -> MARGINAL color -> NO_PEN color
+            for step in xrange(GRAD_COUNT):
+                t = step / float(GRAD_COUNT - 1) if GRAD_COUNT > 1 else 0.5
+                if t <= 0.5:
+                    s = t * 2.0
+                    r = int(pen_rgb[0] + (mar_rgb[0] - pen_rgb[0]) * s + 0.5)
+                    g = int(pen_rgb[1] + (mar_rgb[1] - pen_rgb[1]) * s + 0.5)
+                    b = int(pen_rgb[2] + (mar_rgb[2] - pen_rgb[2]) * s + 0.5)
+                else:
+                    s = (t - 0.5) * 2.0
+                    r = int(mar_rgb[0] + (nop_rgb[0] - mar_rgb[0]) * s + 0.5)
+                    g = int(mar_rgb[1] + (nop_rgb[1] - mar_rgb[1]) * s + 0.5)
+                    b = int(mar_rgb[2] + (nop_rgb[2] - mar_rgb[2]) * s + 0.5)
+                pal[offset + GRAD_BASE + step] = struct.pack('4B', r, g, b, a)
         return pal
 
     def _rows(self, codes, gw, gh):
@@ -1841,6 +2751,143 @@ class Heatmap(object):
             ov.destroy()
         self.secondaries.clear()
         self._sec_robin = 0
+
+    def _drop_xrays(self):
+        """Remove all xray overlays."""
+        for ov in self.xrays.values():
+            ov.destroy()
+        self.xrays.clear()
+        self._xray_robin = 0
+
+    def _drop_ghosts(self):
+        """Remove all ghost silhouettes."""
+        for gh in self.ghosts.values():
+            gh.destroy()
+        self.ghosts.clear()
+        if hasattr(self, '_xray_last_pos'):
+            self._xray_last_pos.clear()
+            self._xray_last_vel.clear()
+            self._xray_last_time.clear()
+
+    def _xray_active(self):
+        """True if xray silhouettes should be drawn this frame."""
+        mode = self.cfg.get('xray', 'off')
+        if mode == 'off':
+            return False
+        if mode == 'always':
+            return True
+        if mode == 'key':
+            code = _xray_key_code(self.cfg)
+            return code is not None and BigWorld.isKeyDown(code)
+        return False
+
+    def _hidden_enemies(self, player):
+        """Entity IDs with (entity, corners, box) for enemies behind walls."""
+        primary_id = self.target.id if self.target is not None else None
+        view = View()
+        result = {}
+        try:
+            entities = BigWorld.entities.values()
+        except Exception:
+            return result
+        for entity in entities:
+            if entity.id == primary_id:
+                continue
+            if not self._is_target(entity, player):
+                continue
+            # skip allies: xray is for enemies only
+            try:
+                if entity.publicInfo['team'] == player.team:
+                    continue
+            except Exception:
+                continue
+            corners = target_corners(entity)
+            box = view.box(corners)
+            if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
+                continue
+            # check if the entity is behind a wall
+            if not _is_behind_wall(entity, view):
+                continue
+            result[entity.id] = (entity, corners, box, view)
+            if len(result) >= XRAY_MAX:
+                break
+        return result
+
+    def _frame_xrays(self, player, now):
+        """Manage xray overlays; returns True if any are active."""
+        hidden = self._hidden_enemies(player)
+        ghost_on = bool(self.cfg.get('xray_ghost'))
+        try:
+            entities = BigWorld.entities
+        except Exception:
+            entities = {}
+        # remove stale overlays; spawn ghosts for enemies that left spotting
+        for tid in list(self.xrays):
+            if tid not in hidden:
+                ov = self.xrays[tid]
+                if ghost_on and ov.pic_sig is not None and tid not in entities:
+                    try:
+                        pos = getattr(self, '_xray_last_pos', {}).get(tid, (0, 0, 0))
+                        vel = getattr(self, '_xray_last_vel', {}).get(tid, (0, 0, 0))
+                        ghost = GhostSilhouette(self, ov, pos, vel, now)
+                        if ghost.pic_rows is not None:
+                            self.ghosts[tid] = ghost
+                    except Exception:
+                        pass
+                ov.destroy()
+                del self.xrays[tid]
+        # track velocity of xray targets for ghost extrapolation
+        if ghost_on:
+            if not hasattr(self, '_xray_last_pos'):
+                self._xray_last_pos = {}
+                self._xray_last_vel = {}
+                self._xray_last_time = {}
+            for tid in hidden:
+                entity = hidden[tid][0]
+                try:
+                    pos = entity.position
+                    cur = (pos.x, pos.y, pos.z)
+                except Exception:
+                    continue
+                prev = self._xray_last_pos.get(tid)
+                prev_t = self._xray_last_time.get(tid, now)
+                dt = now - prev_t
+                if prev is not None and dt > 0.05:
+                    self._xray_last_vel[tid] = ((cur[0] - prev[0]) / dt,
+                                                (cur[1] - prev[1]) / dt,
+                                                (cur[2] - prev[2]) / dt)
+                self._xray_last_pos[tid] = cur
+                self._xray_last_time[tid] = now
+        # create new overlays
+        for tid in hidden:
+            if tid not in self.xrays:
+                self.xrays[tid] = XrayOverlay(self)
+        if not self.xrays:
+            self._xray_robin = 0
+            return bool(self.ghosts)
+        # update positions of existing silhouettes
+        for tid, (entity, corners, box, view) in hidden.items():
+            ov = self.xrays[tid]
+            if ov.pic is not None and ov.pic[0] == tid:
+                ov._place(box)
+            else:
+                ov._hide()
+        # one raycast pass per frame (round-robin)
+        tids = sorted(self.xrays.keys())
+        n = len(tids)
+        for _ in xrange(n):
+            idx = self._xray_robin % n
+            self._xray_robin = (self._xray_robin + 1) % n
+            tid = tids[idx]
+            if tid not in hidden:
+                continue
+            ov = self.xrays[tid]
+            if now >= ov.next_pass:
+                entity, corners, box, view = hidden[tid]
+                ov.publish(entity, XRAY_GW, XRAY_GH, box)
+                ov.next_pass = now + 1.0 / XRAY_RATE
+            break
+        return True
 
     # ---- target ----
 
@@ -2090,11 +3137,14 @@ class Heatmap(object):
         cover = bool(self.cfg['hide_covered']) and not self.cover_failed
         scene, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
         wreck_fns = _collect_wrecks(target.id) if cover else []
+        ally_fns = _collect_allies(target.id) if cover else []
         covered_code = COVERED if self.palette[COVERED + PEN][3:] != b'\x00' else None
         covered_cells = 0
         get_mat = target.getMatinfo
         mats = {}
         codes = bytearray(gw * gh)
+        done_mask = bytearray(gw * gh)      # 1 = computed or filled by adaptive skip
+        plate_cache = {}                     # (hit signature) -> shot code
         V3, sqrt, clock = Math.Vector3, math.sqrt, time.clock
         # the rays are laid out for the target as it stood when the pass began; if it drives on
         # during the pass, the rest of them move along with it
@@ -2106,83 +3156,71 @@ class Heatmap(object):
         frames, hit_cells = 1, 0
         work, slice_start = 0.0, clock()
 
-        for j in xrange(gh):
-            ny = (top - (j + 0.5) * ch) * tan_y
-            ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
-            row = j * gw
-            for i in xrange(gw):
-                nx = (left + (i + 0.5) * cw) * tan_x
-                dx, dy, dz = ax + rx * nx, ay + ry * nx, az + rz * nx
-                k = 1.0 / sqrt(dx * dx + dy * dy + dz * dz)
-                dx *= k
-                dy *= k
-                dz *= k
-                sx, sy, sz = cx + dx * t0, cy + dy * t0, cz + dz * t0
-                a = V3(sx, sy, sz)
-                b = V3(cx + dx * t1, cy + dy * t1, cz + dz * t1)
-                if drift is not None:
-                    a, b = drift.applyPoint(a), drift.applyPoint(b)
-                hits = collide(a, b)
-                if hits:
-                    hit_cells += 1
-                    # the point the camera sees, and the shot from the gun to it
-                    d0 = hits[0][0]
-                    hx, hy, hz = sx + dx * d0, sy + dy * d0, sz + dz * d0
-                    qx, qy, qz = hx - gun_x, hy - gun_y, hz - gun_z
-                    ql = sqrt(qx * qx + qy * qy + qz * qz)
-                    code = None
-                    if ql > 0.01:
-                        qx /= ql
-                        qy /= ql
-                        qz /= ql
-                        if he_result is not None or dx * qx + dy * qy + dz * qz < PARALLAX_COS:
-                            a = V3(hx - qx * TRACE_BACK, hy - qy * TRACE_BACK, hz - qz * TRACE_BACK)
-                            b = V3(hx + qx * TRACE_FORWARD, hy + qy * TRACE_FORWARD,
-                                   hz + qz * TRACE_FORWARD)
-                            if drift is not None:
-                                a, b = drift.applyPoint(a), drift.applyPoint(b)
-                            if he_result is not None:
-                                details = target.collideSegmentExt(a, b)
-                                code = NO_PEN
-                                if details:
-                                    code = HE_CODES.get(int(he_result(
-                                        details, full_pp, shell, min_pp, max_pp, target)), NO_PEN)
-                            else:
-                                shot_hits = collide(a, b)
-                                if shot_hits:
-                                    hits = shot_hits
-                    if code is None:
-                        code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
-                    if cover:
-                        seen = t0 + d0 - COVER_GAP    # meters from the camera
-                        if seen > 1.0:
-                            cam_a = V3(cx + dx, cy + dy, cz + dz)
-                            cam_b = V3(cx + dx * seen, cy + dy * seen, cz + dz * seen)
-                            try:
-                                hidden = scene(space, cam_a, cam_b,
-                                               SCENE_FLAGS) is not None
-                            except Exception:
-                                # the engine call is not what the scripts suggest: do without
-                                cover = hidden = False
-                                self.cover_failed = True
-                                log('cover test failed, the map shows through cover',
-                                    traceback.format_exc())
-                            if not hidden:
-                                for wfn in wreck_fns:
-                                    try:
-                                        if wfn(cam_a, cam_b):
-                                            hidden = True
-                                            break
-                                    except Exception:
-                                        pass
-                            if hidden:
-                                covered_cells += 1
-                                code = MISS if covered_code is None else code | covered_code
-                    codes[row + i] = code
-                if not (row + i) & 7 and clock() > self.deadline:
+        # spiral order: cast from the center of the grid outward so the aiming area is
+        # always fresh even when a fine pass is interrupted
+        order = _spiral_order(gw, gh)
+        n_cells = 0
+
+        for idx in order:
+            i = idx % gw
+            j = idx // gw
+
+            # ---- adaptive grid: skip the raycast when enough computed neighbours agree ----
+            cat = -1    # category: -1 = none yet; -2 = disagree
+            nbr = -1    # actual code to fill with
+            n_ok = 0
+            if i > 0 and done_mask[idx - 1]:
+                nbr = codes[idx - 1]
+                cat = _GRAD_CAT[nbr]
+                n_ok = 1
+            if i < gw - 1 and done_mask[idx + 1]:
+                nc = codes[idx + 1]
+                ncat = _GRAD_CAT[nc]
+                if n_ok == 0:
+                    nbr = nc
+                    cat = ncat
+                    n_ok = 1
+                elif cat != -2:
+                    if ncat == cat:
+                        n_ok += 1
+                        nbr = nc
+                    else:
+                        cat = -2
+            if j > 0 and done_mask[idx - gw]:
+                nc = codes[idx - gw]
+                ncat = _GRAD_CAT[nc]
+                if n_ok == 0:
+                    nbr = nc
+                    cat = ncat
+                    n_ok = 1
+                elif cat != -2:
+                    if ncat == cat:
+                        n_ok += 1
+                        nbr = nc
+                    else:
+                        cat = -2
+            if j < gh - 1 and done_mask[idx + gw]:
+                nc = codes[idx + gw]
+                ncat = _GRAD_CAT[nc]
+                if n_ok == 0:
+                    nbr = nc
+                    cat = ncat
+                    n_ok = 1
+                elif cat != -2:
+                    if ncat == cat:
+                        n_ok += 1
+                        nbr = nc
+                    else:
+                        cat = -2
+
+            if n_ok >= 2 and cat >= 0:
+                # all checked neighbours agree: fill without casting
+                codes[idx] = nbr
+                done_mask[idx] = 1
+                n_cells += 1
+                if not n_cells & 63 and clock() > self.deadline:
                     work += clock() - slice_start
                     yield
-                    # the target may have been destroyed while yielded
                     try:
                         app = target.appearance
                         if app is None or app.collisions is None:
@@ -2192,6 +3230,7 @@ class Heatmap(object):
                         return
                     if cover:
                         wreck_fns = _collect_wrecks(target.id)
+                        ally_fns = _collect_allies(target.id)
                     slice_start = clock()
                     frames += 1
                     now = Math.Matrix(target.matrix)
@@ -2200,6 +3239,118 @@ class Heatmap(object):
                         drift.postMultiply(now)
                     else:
                         drift = None
+                continue
+
+            # ---- cast the ray ----
+            ny = (top - (j + 0.5) * ch) * tan_y
+            nx = (left + (i + 0.5) * cw) * tan_x
+            ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
+            dx, dy, dz = ax + rx * nx, ay + ry * nx, az + rz * nx
+            k = 1.0 / sqrt(dx * dx + dy * dy + dz * dz)
+            dx *= k
+            dy *= k
+            dz *= k
+            sx, sy, sz = cx + dx * t0, cy + dy * t0, cz + dz * t0
+            a = V3(sx, sy, sz)
+            b = V3(cx + dx * t1, cy + dy * t1, cz + dz * t1)
+            if drift is not None:
+                a, b = drift.applyPoint(a), drift.applyPoint(b)
+            hits = collide(a, b)
+            if hits:
+                hit_cells += 1
+                # the point the camera sees, and the shot from the gun to it
+                d0 = hits[0][0]
+                hx, hy, hz = sx + dx * d0, sy + dy * d0, sz + dz * d0
+                qx, qy, qz = hx - gun_x, hy - gun_y, hz - gun_z
+                ql = sqrt(qx * qx + qy * qy + qz * qz)
+                code = None
+                if ql > 0.01:
+                    qx /= ql
+                    qy /= ql
+                    qz /= ql
+                    if he_result is not None or dx * qx + dy * qy + dz * qz < PARALLAX_COS:
+                        a = V3(hx - qx * TRACE_BACK, hy - qy * TRACE_BACK, hz - qz * TRACE_BACK)
+                        b = V3(hx + qx * TRACE_FORWARD, hy + qy * TRACE_FORWARD,
+                               hz + qz * TRACE_FORWARD)
+                        if drift is not None:
+                            a, b = drift.applyPoint(a), drift.applyPoint(b)
+                        if he_result is not None:
+                            details = target.collideSegmentExt(a, b)
+                            code = NO_PEN
+                            if details:
+                                code = HE_CODES.get(int(he_result(
+                                    details, full_pp, shell, min_pp, max_pp, target)), NO_PEN)
+                        else:
+                            shot_hits = collide(a, b)
+                            if shot_hits:
+                                hits = shot_hits
+                if code is None:
+                    # ---- per-plate cache: quantised hit signature -> shot code ----
+                    hk = tuple((h[3], h[2], int(h[1] * 40)) for h in hits)
+                    cached = plate_cache.get(hk)
+                    if cached is not None:
+                        code = cached
+                    else:
+                        code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
+                        plate_cache[hk] = code
+                if cover:
+                    seen = t0 + d0 - COVER_GAP    # meters from the camera
+                    if seen > 1.0:
+                        cam_a = V3(cx + dx, cy + dy, cz + dz)
+                        cam_b = V3(cx + dx * seen, cy + dy * seen, cz + dz * seen)
+                        try:
+                            hidden = scene(space, cam_a, cam_b,
+                                           SCENE_FLAGS) is not None
+                        except Exception:
+                            # the engine call is not what the scripts suggest: do without
+                            cover = hidden = False
+                            self.cover_failed = True
+                            log('cover test failed, the map shows through cover',
+                                traceback.format_exc())
+                        if not hidden:
+                            for wfn in wreck_fns:
+                                try:
+                                    if wfn(cam_a, cam_b):
+                                        hidden = True
+                                        break
+                                except Exception:
+                                    pass
+                        if not hidden:
+                            for afn in ally_fns:
+                                try:
+                                    if afn(cam_a, cam_b):
+                                        hidden = True
+                                        break
+                                except Exception:
+                                    pass
+                        if hidden:
+                            covered_cells += 1
+                            code = MISS if covered_code is None else code | covered_code
+                codes[idx] = code
+            done_mask[idx] = 1
+            n_cells += 1
+            if not n_cells & 7 and clock() > self.deadline:
+                work += clock() - slice_start
+                yield
+                # the target may have been destroyed while yielded
+                try:
+                    app = target.appearance
+                    if app is None or app.collisions is None:
+                        return
+                    collide = app.collisions.collideAllWorld
+                except Exception:
+                    return
+                if cover:
+                    wreck_fns = _collect_wrecks(target.id)
+                    ally_fns = _collect_allies(target.id)
+                slice_start = clock()
+                frames += 1
+                now = Math.Matrix(target.matrix)
+                if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
+                    drift = Math.Matrix(base_inv)
+                    drift.postMultiply(now)
+                else:
+                    drift = None
 
         work += clock() - slice_start
         slice_start = clock()
@@ -2333,7 +3484,41 @@ class Heatmap(object):
             sec_active = self._frame_secondaries(player, now)
         elif self.secondaries:
             self._drop_secondaries()
-        if target is not None or sec_active:
+        # xray: silhouettes of enemies behind walls
+        xray_active = False
+        if self._xray_active():
+            xray_active = self._frame_xrays(player, now)
+        elif self.xrays:
+            self._drop_xrays()
+        # ghost silhouettes: faded enemies that left spotting
+        ghost_active = False
+        if self.ghosts:
+            try:
+                entities = BigWorld.entities
+            except Exception:
+                entities = {}
+            for tid in list(self.ghosts):
+                if tid in entities:
+                    self.ghosts[tid].destroy()
+                    del self.ghosts[tid]
+                    continue
+                alive = self.ghosts[tid].update(now)
+                if not alive:
+                    self.ghosts[tid].destroy()
+                    del self.ghosts[tid]
+                else:
+                    ghost_active = True
+        # danger indicator
+        danger_active = False
+        if cfg.get('danger'):
+            if self.danger is None:
+                self.danger = DangerIndicator(self)
+            self.danger.update(player, now)
+            danger_active = True
+        elif self.danger is not None:
+            self.danger.destroy()
+            self.danger = None
+        if target is not None or sec_active or xray_active or ghost_active or danger_active:
             return 0.0
         return IDLE_PERIOD
 
@@ -2463,8 +3648,13 @@ class Heatmap(object):
             if self.pic is not None:
                 self.pic = self.pic[:3] + (None,)
             self._hide_mark()
-        # invalidate secondary overlays on any settings change
+        # invalidate secondary, xray and ghost overlays on any settings change
         self._drop_secondaries()
+        self._drop_xrays()
+        self._drop_ghosts()
+        if self.danger is not None:
+            self.danger.destroy()
+            self.danger = None
         if not cfg['enabled']:
             self._drop()
         elif self.in_battle and self.tick_cb is None:
@@ -2511,16 +3701,17 @@ class Heatmap(object):
     def _resolution_text(self):
         """The settings in use and where to change them, for python.log."""
         name, grid_w, grid_h, min_cell, slice_ms, rate = self.res[:6]
+        res_val, spd_val = self.res[6], self.res[7]
         if slice_ms is None:
             budget = '%.1f ms of work per frame, found from the frame rate' % (self._slice() * 1e3)
         else:
             budget = '%g ms of work per frame, as set' % slice_ms
-        return ('%s (0 speed ... 100 quality): up to %dx%d cells when nothing moves, a cell at '
+        return ('resolution=%g speed=%g: up to %dx%d cells when nothing moves, a cell at '
                 'least %g px; %g updates a second while something moves, with as coarse a grid '
-                'as that takes at %s and %.1f us per cell. The slider is in the panel, '
+                'as that takes at %s and %.1f us per cell. Two sliders in the panel, '
                 'Ctrl+Shift+G; the numbers can be set one by one in %s (read at the start of a '
-                'battle)' % (name, grid_w, grid_h, min_cell, rate, budget, self.cost * 1e6,
-                             os.path.join(self.root, CONFIG_PATH)))
+                'battle)' % (res_val, spd_val, grid_w, grid_h, min_cell, rate, budget,
+                             self.cost * 1e6, os.path.join(self.root, CONFIG_PATH)))
 
     def on_battle_end(self):
         self.in_battle = False
@@ -2541,6 +3732,11 @@ class Heatmap(object):
                 pass
             self.tick_cb = None
         self._drop_secondaries()
+        self._drop_xrays()
+        self._drop_ghosts()
+        if self.danger is not None:
+            self.danger.destroy()
+            self.danger = None
         self.target = None
         self.job = None
         self.pic = self.pic_sig = self.last_key = self.cur_box = None
