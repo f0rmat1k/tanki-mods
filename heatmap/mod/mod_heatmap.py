@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.13.0'
+__version__ = '0.13.2'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -172,7 +172,7 @@ GHOST_FADE_START = 0.6        # start fading at this fraction of ghost_duration
 # danger indicator: how exposed the player is to enemies that can see and shoot them
 DANGER_RATE = 3.0             # updates per second
 DANGER_MAX_ENEMIES = 6        # most enemies to evaluate
-DANGER_AIM_COS = math.cos(math.radians(45))  # enemy turret must face within 45 deg
+DANGER_AIM_COS = math.cos(math.radians(90))  # turret within 90 deg = full threat weight
 DANGER_SAMPLE_N = 5           # control points on the player's collision model
 DANGER_GREEN = (0, 200, 0, 180)       # safe
 DANGER_YELLOW = (220, 200, 0, 180)    # moderate risk
@@ -2131,13 +2131,16 @@ def _xray_key_code(cfg):
 
 # ---- danger indicator ----
 
-def _enemy_aims_at_player(entity, player_pos):
-    """True if the enemy's turret faces towards the player within DANGER_AIM_COS (45 deg)."""
+def _enemy_aim_weight(entity, player_pos):
+    """How much the enemy's turret faces the player: 1.0 = dead on, 0.3 = looking away.
+
+    Every enemy with line of sight is a threat; the turret direction only scales the weight.
+    """
     try:
         model = entity.appearance.compoundModel
         turret = model.node('turret')
         if turret is None:
-            return False
+            return 0.5
         m = Math.Matrix(turret)
         fwd = m.applyToAxis(2)
         dx = player_pos[0] - m.translation.x
@@ -2145,22 +2148,31 @@ def _enemy_aims_at_player(entity, player_pos):
         dz = player_pos[2] - m.translation.z
         dist = math.sqrt(dx * dx + dy * dy + dz * dz)
         if dist < 0.1:
-            return True
+            return 1.0
         cos = (dx * fwd.x + dy * fwd.y + dz * fwd.z) / dist
-        return cos >= DANGER_AIM_COS
+        if cos >= DANGER_AIM_COS:
+            return 1.0
+        if cos >= 0.0:
+            return 0.5
+        return 0.3
     except Exception:
-        # if we cannot read the turret, assume the enemy is a threat if it has line of sight
-        return True
+        return 0.5
 
 
 def _player_collide_fn(player):
-    """The collideAllWorld callable for the player's own vehicle, or None."""
+    """The collideAllWorld callable for the player's own vehicle, or None.
+
+    Returns (entity, collide_fn).  When the collision model is not loaded,
+    entity is still returned (position is usable) but collide_fn is None.
+    """
     try:
         vid = player.playerVehicleID
         entity = BigWorld.entities[vid]
         app = entity.appearance
-        if app is None or app.collisions is None:
-            return None, None
+        if app is None:
+            return entity, None
+        if app.collisions is None:
+            return entity, None
         return entity, app.collisions.collideAllWorld
     except Exception:
         return None, None
@@ -2230,10 +2242,11 @@ def _danger_pen_check(enemy, player_entity, player_collide, sample_points):
     V3 = Math.Vector3
     hits_total = 0
     pens = 0
-    try:
-        get_mat = player_entity.getMatinfo
-    except Exception:
-        return 0.0
+    if player_collide is None:
+        return min(1.0, pen_mm / 300.0)
+    get_mat = getattr(player_entity, 'getMatinfo', None)
+    if get_mat is None:
+        return min(1.0, pen_mm / 300.0)
     for px, py, pz in sample_points:
         dx, dy, dz = px - ex, py - ey, pz - ez
         length = math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -2286,6 +2299,7 @@ class DangerIndicator(object):
         self.bg_comp = None   # black border behind the bar
         self.files = []
         self.pic_sig = None
+        self._log_count = 0   # debug: log first few updates
         self.bg_sig = None
         self.level = 0.0        # 0..1 aggregate danger
         self.next_update = 0.0
@@ -2340,6 +2354,9 @@ class DangerIndicator(object):
         self.next_update = now + 1.0 / DANGER_RATE
         player_entity, player_collide = _player_collide_fn(player)
         if player_entity is None:
+            if self._log_count < 3:
+                self._log_count += 1
+                log('danger: no player entity (pvid=%s)' % getattr(player, 'playerVehicleID', '?'))
             self._hide()
             return
         try:
@@ -2350,8 +2367,12 @@ class DangerIndicator(object):
             return
         sample_points = _sample_player_points(player_entity)
         if not sample_points:
-            self._hide()
-            return
+            try:
+                pp = player_entity.position
+                sample_points = [(pp.x, pp.y + 1.0, pp.z)]
+            except Exception:
+                self._hide()
+                return
         # find threatening enemies
         threats = []
         try:
@@ -2374,37 +2395,45 @@ class DangerIndicator(object):
                     continue
                 if entity.publicInfo['team'] == my_team:
                     continue
-                app = getattr(entity, 'appearance', None)
-                if app is None or getattr(app, 'collisions', None) is None:
-                    continue
             except Exception:
                 continue
-            # line of sight: static scene must not block the ray
+            # line of sight: try multiple heights to avoid ground clipping
+            has_los = False
             try:
                 e_pos = entity.position
-                a = Math.Vector3(e_pos.x, e_pos.y + 2.0, e_pos.z)
-                b = Math.Vector3(player_pos[0], player_pos[1], player_pos[2])
-                if BigWorld.collideSegment(space, a, b, SCENE_FLAGS) is not None:
-                    continue
+                for dy_e, dy_p in ((2.0, 1.0), (2.5, 1.5), (1.5, 0.5)):
+                    a = Math.Vector3(e_pos.x, e_pos.y + dy_e, e_pos.z)
+                    b = Math.Vector3(player_pos[0], player_pos[1] + dy_p - 1.0, player_pos[2])
+                    if BigWorld.collideSegment(space, a, b, SCENE_FLAGS) is None:
+                        has_los = True
+                        break
             except Exception:
                 continue
-            # turret aimed roughly at the player
-            if not _enemy_aims_at_player(entity, player_pos):
+            if not has_los:
                 continue
-            threats.append(entity)
+            aim_w = _enemy_aim_weight(entity, player_pos)
+            threats.append((entity, aim_w))
+        do_log = self._log_count < 20
+        if do_log:
+            self._log_count += 1
+            log('danger: threats=%d samples=%d' % (len(threats), len(sample_points)))
         if not threats:
             self.level = 0.0
             self._show_bar()
             return
-        # aggregate danger
+        # aggregate danger: weighted by turret direction
         max_pen = 0.0
-        for enemy in threats:
+        for enemy, aim_w in threats:
             d = _danger_pen_check(enemy, player_entity, player_collide, sample_points)
+            d *= aim_w
+            if do_log:
+                log('  enemy %s pen=%.2f aim=%.1f' % (enemy.id, d, aim_w))
             if d > max_pen:
                 max_pen = d
-        # scale: number of threats matters too
         n = len(threats)
         self.level = min(1.0, max_pen * 0.7 + min(n, 3) / 3.0 * 0.3)
+        if do_log:
+            log('  level=%.2f' % self.level)
         self._show_bar()
 
     def _show_bar(self):
@@ -3213,7 +3242,7 @@ class Heatmap(object):
                     else:
                         cat = -2
 
-            if n_ok >= 2 and cat >= 0:
+            if n_ok >= 2 and cat > 0:
                 # all checked neighbours agree: fill without casting
                 codes[idx] = nbr
                 done_mask[idx] = 1
@@ -3513,6 +3542,7 @@ class Heatmap(object):
         if cfg.get('danger'):
             if self.danger is None:
                 self.danger = DangerIndicator(self)
+                log('danger indicator created')
             self.danger.update(player, now)
             danger_active = True
         elif self.danger is not None:
