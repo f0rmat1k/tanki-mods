@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.14.0'
+__version__ = '0.14.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -174,6 +174,11 @@ STILL_GUN_COS = math.cos(math.radians(0.4))    # the side the gun shoots at it f
 STILL_DISTANCE = 0.03         # share of the distance from the target to the camera or the gun
 STILL_PART = 0.15             # meters a corner of a part's box moved on the target (turret, gun)
 STILL_ZOOM = 0.01             # share the zoom changed by
+# zoom-adaptive resolution: at high zoom, increase grid detail automatically
+ZOOM_REF_TAN = 0.70           # tan(half-FOV) of the arcade camera (~35 degrees)
+ZOOM_BOOST_START = 8.0        # start boosting resolution at this zoom factor
+ZOOM_BOOST_MAX = 3.0          # maximum resolution multiplier
+ZOOM_GRID_CAP = 1024          # boosted grid_w/grid_h never exceeds this
 # a still scene gets a new fine pass when its place on the screen changed this much
 REFRESH_SIZE = 0.05           # share of the box's width or height
 REFRESH_SHIFT = 0.15          # clip units (the screen is 2 wide) the box moved
@@ -2474,6 +2479,14 @@ class Heatmap(object):
         if w_px < 2.0 or h_px < 2.0:
             return
         grid_w, grid_h, min_cell = self.res[1:4]
+        # zoom-adaptive: boost resolution when zoomed in heavily
+        if view.tan_y < ZOOM_REF_TAN:
+            zoom = ZOOM_REF_TAN / max(view.tan_y, 0.001)
+            if zoom >= ZOOM_BOOST_START:
+                boost = min(zoom / ZOOM_BOOST_START, ZOOM_BOOST_MAX)
+                grid_w = min(int(grid_w * boost), ZOOM_GRID_CAP)
+                grid_h = min(int(grid_h * boost), ZOOM_GRID_CAP)
+                min_cell = max(0.5, min_cell / boost)
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
         cell = finest
         if not fine:
