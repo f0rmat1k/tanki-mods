@@ -1427,71 +1427,10 @@ EVENTS.onAvatarReady()
 STATE.target = enemy
 frames(600)
 
-# ---- ghost silhouettes: faded enemy after leaving spotting ----
-check(g.cfg.get('xray_ghost', False) is False, 'xray_ghost default is off')
-check(len(g.ghosts) == 0, 'no ghosts when off')
-
-# set up: enemy behind wall with xray on and ghost on
-ghost_enemy = Vehicle(20, 2, (0.5, 0.0, 22.0), 0.0)
-ENTITIES[ghost_enemy.id] = ghost_enemy
-WALL['x'] = 2.0
-g.apply_settings({'xray': 'always', 'xray_ghost': True})
-frames(600)
-check(ghost_enemy.id in g.xrays, 'ghost setup: xray overlay for enemy behind wall')
-xr = g.xrays[ghost_enemy.id]
-check(xr.pic_sig is not None, 'ghost setup: xray silhouette rendered')
-
-# enemy disappears from spotting: remove from entities
-del ENTITIES[ghost_enemy.id]
-frames(10)
-check(ghost_enemy.id not in g.xrays, 'enemy vanished: xray overlay gone')
-check(ghost_enemy.id in g.ghosts, 'enemy vanished: ghost silhouette spawned')
-gh = g.ghosts[ghost_enemy.id]
-check(gh.comp is not None and gh.comp.visible, 'ghost silhouette visible')
-
-# ghost persists for a while
-frames(100)
-check(ghost_enemy.id in g.ghosts, 'ghost persists after 1 second')
-
-# enemy reappears: ghost should vanish immediately
-ENTITIES[ghost_enemy.id] = ghost_enemy
-frames(5)
-check(ghost_enemy.id not in g.ghosts, 'ghost gone when enemy reappears')
-
-# set up ghost again, then wait for expiry
-# enemy is in ENTITIES from the reappearance test; let xray rebuild first
-frames(600)
-check(ghost_enemy.id in g.xrays, 'ghost setup again: xray rebuilt')
-del ENTITIES[ghost_enemy.id]
-frames(10)
-check(ghost_enemy.id in g.ghosts, 'ghost setup again: ghost spawned')
-# now wait for ghost to expire (5 seconds)
-STATE.time += 6.0
-frames(10)
-check(ghost_enemy.id not in g.ghosts, 'ghost expires after duration')
-
-# toggle: ghost off should not create ghosts
-ENTITIES[ghost_enemy.id] = ghost_enemy
-g.apply_settings({'xray_ghost': False})
-frames(600)
-check(ghost_enemy.id in g.xrays, 'ghost off: xray still works')
-del ENTITIES[ghost_enemy.id]
-frames(10)
-check(ghost_enemy.id not in g.ghosts, 'ghost off: no ghost spawned')
-
-# panel toggle
-game.handleKeyEvent(PANEL_KEY)
-check(g.cfg['xray_ghost'] is False, 'xray_ghost starts off in panel')
-check(click(('toggle', 'xray_ghost')) is True and g.cfg['xray_ghost'] is True, 'ghost toggle on')
-check(click(('toggle', 'xray_ghost')) is True and g.cfg['xray_ghost'] is False, 'ghost toggle off')
-check(saved()['xray_ghost'] is False, 'ghost saved to config')
-game.handleKeyEvent(KeyEvent(1))
-
-# clean up
-g.apply_settings({'xray': 'off', 'xray_ghost': False})
+# clean up xray
+g.apply_settings({'xray': 'off'})
 WALL['x'] = None
 EVENTS.onAvatarBecomeNonPlayer()
-check(len(g.ghosts) == 0, 'battle end cleans up ghosts')
 EVENTS.onAvatarReady()
 STATE.target = enemy
 frames(600)

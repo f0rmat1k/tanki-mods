@@ -90,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.13.2'
+__version__ = '0.13.3'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -130,8 +130,6 @@ DEFAULTS = {
     },
     'xray': 'off',            # enemy silhouettes behind walls: 'off', 'always', 'key'
     'xray_key': 'MOUSE3',     # key name (Keys.KEY_*) when xray='key'; MOUSE3 = Mouse4
-    'xray_ghost': False,       # show faded ghost silhouette for enemies that disappear from spotting
-    'xray_ghost_duration': 5.0,  # seconds to show the ghost after the enemy disappears
     'danger': False,           # danger indicator: how exposed the player is to aimed enemies
     'debug': False,
 }
@@ -167,8 +165,6 @@ XRAY_COLOR = (255, 100, 30, 100)  # RGBA: semi-transparent orange
 XRAY_RATE = 2.0               # updates per second for xray silhouettes
 XRAY_MAX = 5                  # most enemies to draw xray silhouettes for
 XRAY_MODES = ('off', 'always', 'key')   # panel cycle order
-GHOST_ALPHA = 60              # alpha for ghost silhouettes (vs 100 for live xray)
-GHOST_FADE_START = 0.6        # start fading at this fraction of ghost_duration
 # danger indicator: how exposed the player is to enemies that can see and shoot them
 DANGER_RATE = 3.0             # updates per second
 DANGER_MAX_ENEMIES = 6        # most enemies to evaluate
@@ -964,7 +960,7 @@ LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_p
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
 PANEL_DEFAULTS = ('enabled', 'resolution', 'speed') + TUNING_KEYS + ('alpha', 'hide_covered',
-                  'best_point', 'show_allies', 'show_all_visible', 'xray', 'xray_ghost', 'danger')
+                  'best_point', 'show_allies', 'show_all_visible', 'xray', 'danger')
 TRANSPARENCY_STEP = 5     # percent
 
 
@@ -1196,9 +1192,6 @@ def render_panel(cfg, res, font, measured=None):
     c.text(font, r[0] + (bw - width(xray_label)) // 2, mid(y, y + ROW), xray_label,
            P_TEXT if xray != 'off' else P_HINT)
     hits.append(((0, y, W, y + ROW), ('cycle_xray',)))
-    y += ROW
-
-    toggle(y, 'xray_ghost', u'Призрак после засвета')
     y += ROW
 
     toggle(y, 'danger', u'Индикатор опасности')
@@ -1970,144 +1963,6 @@ class XrayOverlay(object):
         self.pic = self.pic_sig = None
 
 
-class GhostSilhouette(object):
-    """A faded silhouette of an enemy that just left spotting, extrapolated along its last velocity."""
-
-    def __init__(self, owner, xray_overlay, last_pos, velocity, spawn_time):
-        self.owner = owner
-        self.comp = None
-        self.files = []
-        self.counter = 0
-        self.last_pos = last_pos       # Math.Vector3: position when the enemy vanished
-        self.velocity = velocity       # Math.Vector3: velocity at that moment
-        self.spawn_time = spawn_time   # BigWorld.time() when ghost was created
-        self.pic_rows = None           # cached pixel rows from the xray overlay
-        self.pic_gw = 0
-        self.pic_gh = 0
-        self.pic_sig = None
-        if xray_overlay.pic_sig is not None:
-            self.pic_gw = xray_overlay.pic_sig[0]
-            self.pic_gh = xray_overlay.pic_sig[1]
-            self.pic_rows = xray_overlay.pic_sig[2]
-
-    def _write_png(self, png):
-        owner = self.owner
-        self.counter += 1
-        name = 'hm_gh%d_%d.png' % (os.getpid(), self.counter)
-        with open(os.path.join(owner.cache_dir, name), 'wb') as f:
-            f.write(png)
-        self.files.append(name)
-        while len(self.files) > 2:
-            try:
-                os.remove(os.path.join(owner.cache_dir, self.files.pop(0)))
-            except OSError:
-                pass
-        try:
-            ResMgr.purge(owner.cache_vfs, True)
-        except Exception:
-            pass
-        return '%s/%s' % (owner.cache_vfs, name)
-
-    def _component(self, tex):
-        c = self.comp
-        if c is not None:
-            c.textureName = tex
-            return c
-        S = GUI.Simple
-        c = self.comp = S(tex)
-        c.materialFX = S.eMaterialFX.BLEND
-        c.widthMode = c.heightMode = S.eSizeMode.PIXEL
-        c.horizontalPositionMode = c.verticalPositionMode = S.ePositionMode.CLIP
-        c.horizontalAnchor = S.eHAnchor.LEFT
-        c.verticalAnchor = S.eVAnchor.TOP
-        try:
-            c.filterType = S.eFilterType.POINT
-        except Exception:
-            pass
-        c.visible = False
-        GUI.addRoot(c)
-        return c
-
-    def extrapolated_pos(self, now):
-        dt = now - self.spawn_time
-        vx, vy, vz = self.velocity
-        return Math.Vector3(self.last_pos[0] + vx * dt,
-                            self.last_pos[1] + vy * dt,
-                            self.last_pos[2] + vz * dt)
-
-    def update(self, now):
-        cfg = self.owner.cfg
-        duration = float(cfg.get('xray_ghost_duration', 5.0))
-        elapsed = now - self.spawn_time
-        if elapsed >= duration or self.pic_rows is None:
-            self._hide()
-            return False
-        fade_start = duration * GHOST_FADE_START
-        if elapsed > fade_start:
-            alpha = int(GHOST_ALPHA * (1.0 - (elapsed - fade_start) / (duration - fade_start)))
-        else:
-            alpha = GHOST_ALPHA
-        if alpha < 5:
-            self._hide()
-            return False
-        ghost_pos = self.extrapolated_pos(now)
-        view = View()
-        half_h = 2.0
-        corners = [(ghost_pos[0] + dx, ghost_pos[1] + dy, ghost_pos[2] + dz)
-                    for dx in (-2.0, 2.0) for dy in (0.0, half_h * 2) for dz in (-3.5, 3.5)]
-        box = view.box(corners)
-        if box is None or box[2] < -1.5 or box[0] > 1.5 or box[3] < -1.5 or box[1] > 1.5:
-            self._hide()
-            return True
-        gw, gh = self.pic_gw, self.pic_gh
-        ghost_color = (XRAY_COLOR[0], XRAY_COLOR[1], XRAY_COLOR[2], alpha)
-        gc = bytes(bytearray(ghost_color))
-        empty = bytes(bytearray((0, 0, 0, 0)))
-        orig_color = bytes(bytearray(XRAY_COLOR))
-        rows = []
-        for row in self.pic_rows:
-            new_row = []
-            for px in range(0, len(row), 4):
-                pixel = row[px:px + 4]
-                if pixel == orig_color:
-                    new_row.append(gc)
-                else:
-                    new_row.append(empty)
-            rows.append(b''.join(new_row))
-        sig = (gw, gh, alpha)
-        if sig != self.pic_sig or self.comp is None:
-            self._component(self._write_png(png_rgba(gw, gh, rows)))
-            self.pic_sig = sig
-        sw, sh = GUI.screenResolution()[:2]
-        bw = (box[2] - box[0]) * 0.5 * sw
-        bh = (box[3] - box[1]) * 0.5 * sh
-        c = self.comp
-        c.position = (box[0], box[3], 1.0)
-        c.width, c.height = bw, bh
-        c.visible = True
-        return True
-
-    def _hide(self):
-        if self.comp is not None:
-            self.comp.visible = False
-
-    def destroy(self):
-        owner = self.owner
-        if self.comp is not None:
-            try:
-                GUI.delRoot(self.comp)
-            except Exception:
-                pass
-            self.comp = None
-        for name in self.files:
-            try:
-                os.remove(os.path.join(owner.cache_dir, name))
-            except OSError:
-                pass
-        self.files = []
-        self.pic_rows = self.pic_sig = None
-
-
 def _is_behind_wall(entity, view):
     """True if the static scene blocks the line from the camera to the entity's center."""
     try:
@@ -2573,7 +2428,6 @@ class Heatmap(object):
         self._sec_robin = 0       # round-robin index for time-slicing among secondaries
         self.xrays = {}           # entity id -> XrayOverlay (enemies behind walls)
         self._xray_robin = 0
-        self.ghosts = {}          # entity id -> GhostSilhouette (faded after leaving spotting)
         self.danger = None        # DangerIndicator (position danger light)
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
@@ -2788,16 +2642,6 @@ class Heatmap(object):
         self.xrays.clear()
         self._xray_robin = 0
 
-    def _drop_ghosts(self):
-        """Remove all ghost silhouettes."""
-        for gh in self.ghosts.values():
-            gh.destroy()
-        self.ghosts.clear()
-        if hasattr(self, '_xray_last_pos'):
-            self._xray_last_pos.clear()
-            self._xray_last_vel.clear()
-            self._xray_last_time.clear()
-
     def _xray_active(self):
         """True if xray silhouettes should be drawn this frame."""
         mode = self.cfg.get('xray', 'off')
@@ -2845,55 +2689,18 @@ class Heatmap(object):
     def _frame_xrays(self, player, now):
         """Manage xray overlays; returns True if any are active."""
         hidden = self._hidden_enemies(player)
-        ghost_on = bool(self.cfg.get('xray_ghost'))
-        try:
-            entities = BigWorld.entities
-        except Exception:
-            entities = {}
-        # remove stale overlays; spawn ghosts for enemies that left spotting
+        # remove stale overlays
         for tid in list(self.xrays):
             if tid not in hidden:
-                ov = self.xrays[tid]
-                if ghost_on and ov.pic_sig is not None and tid not in entities:
-                    try:
-                        pos = getattr(self, '_xray_last_pos', {}).get(tid, (0, 0, 0))
-                        vel = getattr(self, '_xray_last_vel', {}).get(tid, (0, 0, 0))
-                        ghost = GhostSilhouette(self, ov, pos, vel, now)
-                        if ghost.pic_rows is not None:
-                            self.ghosts[tid] = ghost
-                    except Exception:
-                        pass
-                ov.destroy()
+                self.xrays[tid].destroy()
                 del self.xrays[tid]
-        # track velocity of xray targets for ghost extrapolation
-        if ghost_on:
-            if not hasattr(self, '_xray_last_pos'):
-                self._xray_last_pos = {}
-                self._xray_last_vel = {}
-                self._xray_last_time = {}
-            for tid in hidden:
-                entity = hidden[tid][0]
-                try:
-                    pos = entity.position
-                    cur = (pos.x, pos.y, pos.z)
-                except Exception:
-                    continue
-                prev = self._xray_last_pos.get(tid)
-                prev_t = self._xray_last_time.get(tid, now)
-                dt = now - prev_t
-                if prev is not None and dt > 0.05:
-                    self._xray_last_vel[tid] = ((cur[0] - prev[0]) / dt,
-                                                (cur[1] - prev[1]) / dt,
-                                                (cur[2] - prev[2]) / dt)
-                self._xray_last_pos[tid] = cur
-                self._xray_last_time[tid] = now
         # create new overlays
         for tid in hidden:
             if tid not in self.xrays:
                 self.xrays[tid] = XrayOverlay(self)
         if not self.xrays:
             self._xray_robin = 0
-            return bool(self.ghosts)
+            return False
         # update positions of existing silhouettes
         for tid, (entity, corners, box, view) in hidden.items():
             ov = self.xrays[tid]
@@ -3519,24 +3326,6 @@ class Heatmap(object):
             xray_active = self._frame_xrays(player, now)
         elif self.xrays:
             self._drop_xrays()
-        # ghost silhouettes: faded enemies that left spotting
-        ghost_active = False
-        if self.ghosts:
-            try:
-                entities = BigWorld.entities
-            except Exception:
-                entities = {}
-            for tid in list(self.ghosts):
-                if tid in entities:
-                    self.ghosts[tid].destroy()
-                    del self.ghosts[tid]
-                    continue
-                alive = self.ghosts[tid].update(now)
-                if not alive:
-                    self.ghosts[tid].destroy()
-                    del self.ghosts[tid]
-                else:
-                    ghost_active = True
         # danger indicator
         danger_active = False
         if cfg.get('danger'):
@@ -3548,7 +3337,7 @@ class Heatmap(object):
         elif self.danger is not None:
             self.danger.destroy()
             self.danger = None
-        if target is not None or sec_active or xray_active or ghost_active or danger_active:
+        if target is not None or sec_active or xray_active or danger_active:
             return 0.0
         return IDLE_PERIOD
 
@@ -3678,10 +3467,9 @@ class Heatmap(object):
             if self.pic is not None:
                 self.pic = self.pic[:3] + (None,)
             self._hide_mark()
-        # invalidate secondary, xray and ghost overlays on any settings change
+        # invalidate secondary and xray overlays on any settings change
         self._drop_secondaries()
         self._drop_xrays()
-        self._drop_ghosts()
         if self.danger is not None:
             self.danger.destroy()
             self.danger = None
@@ -3763,7 +3551,6 @@ class Heatmap(object):
             self.tick_cb = None
         self._drop_secondaries()
         self._drop_xrays()
-        self._drop_ghosts()
         if self.danger is not None:
             self.danger.destroy()
             self.danger = None
