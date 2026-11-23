@@ -112,7 +112,7 @@ try:
 except Exception:
     pass
 
-__version__ = '0.16.1'
+__version__ = '0.16.2'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -450,10 +450,13 @@ def speed_rate(spd_val):
 
 
 def quality_params(quality):
-    """(resolution_val, speed_val) for a quality slider value 1-10."""
+    """(resolution_val, speed_val) for a quality slider value 1-10.
+    Resolution reaches max at quality 8 so the top of the slider is as sharp as
+    the old maximum-resolution setting.  Speed grows linearly the whole way."""
     t = (min(max(float(quality), 1.0), 10.0) - 1.0) / 9.0
-    val = t * 100.0
-    return val, val
+    res_val = min(t * 100.0 * 9.0 / 7.0, 100.0)
+    spd_val = t * 100.0
+    return res_val, spd_val
 
 
 def _migrate_res_speed_to_quality(res_val, spd_val):
@@ -2689,7 +2692,7 @@ class Heatmap(object):
                     else:
                         cat = -2
 
-            if n_ok >= 2 and cat > 0 or n_ok >= 3 and cat == 0:
+            if n_ok >= 2 and cat > 0:
                 # all checked neighbours agree: fill without casting
                 codes[idx] = nbr
                 done_mask[idx] = 1
