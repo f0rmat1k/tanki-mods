@@ -112,7 +112,7 @@ try:
 except Exception:
     pass
 
-__version__ = '0.16.3'
+__version__ = '0.16.4'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -183,6 +183,12 @@ XRAY_COLOR = (255, 100, 30, 100)  # RGBA: semi-transparent orange
 XRAY_RATE = 2.0               # updates per second for xray silhouettes
 XRAY_MAX = 5                  # most enemies to draw xray silhouettes for
 XRAY_MODES = ('off', 'always', 'key')   # panel cycle order
+
+# focus boost: when few enemies are visible and the target is near screen centre,
+# the grid may use up to FOCUS_MAX_BOOST times more cells (the min_cell shrinks to match)
+FOCUS_MAX_BOOST = 2.0         # maximum resolution multiplier (1 target, dead centre)
+FOCUS_FEW = 2                 # at most this many visible enemies for the full boost
+FOCUS_CENTRE = 0.3            # clip-space radius from screen centre for full boost (screen is 2 wide)
 
 DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the game
 FAST_FILL = 0.85              # share of that time a fast pass is planned to take
@@ -1628,7 +1634,7 @@ class SecondaryOverlay(object):
 
     # ---- pass ----
 
-    def start_pass(self, player, target, view, corners, box, scene, fine):
+    def start_pass(self, player, target, view, corners, box, scene, fine, n_visible=10):
         """Begin a pass over the grid with SECONDARY_SCALE of the primary resolution."""
         owner = self.owner
         shot = player.getVehicleDescriptor().shot
@@ -1671,6 +1677,11 @@ class SecondaryOverlay(object):
         grid_w = max(4, int(owner.res[1] * SECONDARY_SCALE))
         grid_h = max(4, int(owner.res[2] * SECONDARY_SCALE))
         min_cell = owner.res[3]
+        boost = Heatmap._focus_boost(box, n_visible)
+        if boost > 1.0:
+            grid_w = min(int(grid_w * boost), 512)
+            grid_h = min(int(grid_h * boost), int(512 * GRID_ASPECT))
+            min_cell = max(min_cell / boost, 1.0)
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
         cell = finest
         if not fine:
@@ -2483,6 +2494,22 @@ class Heatmap(object):
         work = most / frame / self.res[5] * FAST_FILL
         return max(MIN_FAST_CELLS, work / self.cost)
 
+    @staticmethod
+    def _focus_boost(box, n_visible):
+        """Resolution multiplier when few enemies are on screen and the target is centred.
+        Returns a factor >= 1.0 to multiply grid_w / grid_h by (min_cell is divided)."""
+        if n_visible > FOCUS_FEW or FOCUS_MAX_BOOST <= 1.0:
+            return 1.0
+        # how centred the target's box is: 0 = dead centre, 1 = at the edge
+        bcx = (box[0] + box[2]) * 0.5    # clip x, screen is -1..+1
+        bcy = (box[1] + box[3]) * 0.5    # clip y
+        off = math.sqrt(bcx * bcx + bcy * bcy)
+        centre_t = min(off / FOCUS_CENTRE, 1.0)   # 0 = centred, 1 = far from centre
+        # fewer targets → more boost; 1 target → full, FOCUS_FEW → half
+        count_t = (float(n_visible) - 1.0) / max(float(FOCUS_FEW), 1.0)   # 0..1
+        strength = (1.0 - centre_t) * (1.0 - count_t)
+        return 1.0 + (FOCUS_MAX_BOOST - 1.0) * strength
+
     def _start_pass(self, player, target, view, corners, box, scene, fine):
         """Begin a pass over the grid: a fine one with the full grid of the quality, or a fast
         one with as many cells as there is time for."""
@@ -2518,6 +2545,13 @@ class Heatmap(object):
         if w_px < 2.0 or h_px < 2.0:
             return
         grid_w, grid_h, min_cell = self.res[1:4]
+        # focus boost: when few enemies are on screen and the target is centred, use
+        # a finer grid so a zoomed-in single target is not pixelated
+        boost = self._focus_boost(box, self._count_on_screen(player, view))
+        if boost > 1.0:
+            grid_w = min(int(grid_w * boost), 512)
+            grid_h = min(int(grid_h * boost), int(512 * GRID_ASPECT))
+            min_cell = max(min_cell / boost, 1.0)
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
         cell = finest
         if not fine:
@@ -2978,6 +3012,25 @@ class Heatmap(object):
             return 0.0
         return IDLE_PERIOD
 
+    def _count_on_screen(self, player, view):
+        """How many enemy vehicles are on the screen right now (cheap, no corner/box stored)."""
+        count = 0
+        try:
+            entities = BigWorld.entities.values()
+        except Exception:
+            return 1       # assume at least the primary target
+        for entity in entities:
+            if not self._is_target(entity, player):
+                continue
+            corners = target_corners(entity)
+            box = view.box(corners)
+            if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
+                continue
+            count += 1
+            if count > FOCUS_FEW:
+                return count    # no point counting further
+        return max(count, 1)
+
     def _visible_enemies(self, player):
         """Entity IDs with (entity, corners, box) for enemies on screen now."""
         primary_id = self.target.id if self.target is not None else None
@@ -3048,7 +3101,8 @@ class Heatmap(object):
                 if fine is not None:
                     ov.next_pass = now + 1.0 / self.res[5]
                     ov.pass_start = now
-                    ov.start_pass(player, entity, view, corners, box, scene, fine)
+                    ov.start_pass(player, entity, view, corners, box, scene, fine,
+                                  1 + len(visible))
             if ov.job is not None:
                 ov.deadline = time.clock() + self._slice() * SECONDARY_SLICE_SHARE
                 try:
