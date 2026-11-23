@@ -112,7 +112,7 @@ try:
 except Exception:
     pass
 
-__version__ = '0.16.4'
+__version__ = '0.16.5'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -2928,6 +2928,7 @@ class Heatmap(object):
         if not cfg['enabled'] or not self.cache_ready or not self._can_aim(player):
             self._drop()
             self._drop_secondaries()
+            self._drop_xrays()
             return OFF_PERIOD
         now = BigWorld.time()
         if self.last_frame is not None and 0.0 < now - self.last_frame < 0.25:

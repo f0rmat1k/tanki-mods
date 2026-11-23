@@ -1371,6 +1371,19 @@ check(click(('cycle_xray',)) is True and g.cfg['xray'] == 'off', 'cycle xray: ke
 check(saved()['xray'] == 'off', 'xray saved to config')
 game.handleKeyEvent(KeyEvent(1))
 
+# player death clears all overlays (xrays, primary, secondaries) via _can_aim -> _drop
+WALL['x'] = 2.0
+g.apply_settings({'xray': 'always'})
+frames(600)
+check(len(g.xrays) > 0, 'xray active before player death')
+check(g.comp is not None and g.comp.visible, 'primary heatmap visible before death')
+STATE.player.isVehicleAlive = False
+frames(10)
+check(len(g.xrays) == 0, 'player death clears xray overlays')
+check(g.comp is None or not g.comp.visible, 'player death hides primary heatmap')
+STATE.player.isVehicleAlive = True
+frames(600)
+
 # battle end cleans up xrays
 WALL['x'] = 2.0
 g.apply_settings({'xray': 'always'})
