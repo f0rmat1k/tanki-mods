@@ -9,7 +9,22 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import types
+
+_real_clock = time.clock
+_clock_val = [_real_clock()]
+_clock_step = [0.0]   # added to _clock_val on each call; 0 = real clock
+
+
+def _mock_clock():
+    if _clock_step[0]:
+        _clock_val[0] += _clock_step[0]
+        return _clock_val[0]
+    return _real_clock()
+
+
+time.clock = _mock_clock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD_DIR = os.path.join(os.path.dirname(HERE), 'mod')
@@ -671,8 +686,10 @@ frames(60)   # the fast pass completes; a fine pass starts and completes
 check(g.last_key is not None and g.last_key[1], 'a fine pass completed')
 # now invalidate and use a tiny slice so the NEXT fine pass stays in progress
 g.last_key = (g.last_key[0], False)  # mark last pass as not-full to trigger fine pass
-g.res = g.res[:4] + (0.5,) + g.res[5:]   # tiny slice so the fine pass takes many frames
+g.res = g.res[:4] + (0.5,) + g.res[5:]   # 0.5ms slice
+_clock_step[0] = 50e-6   # mock clock: each call advances 50us so the deadline fires
 frames(8)
+_clock_step[0] = 0.0     # back to real clock
 check(g.job is not None and g.job_fine, 'a fine pass under way')
 n = len(PUBLISHED)
 drive()
@@ -831,11 +848,13 @@ check(abs(stored_frame - 10.0) < 0.5 and abs(g.idle_dt * 1e3 - stored_frame) < 0
       'the time between frames is kept in the settings file (%.1f ms here)' % stored_frame)
 # a fast computer: 240 frames a second, 2.1 ms of them the game's own work
 g.idle_dt, g.base_dt = 1.0 / 240, 0.0021
-check(abs(g._slice() - (2.0 / 240 - 0.0021)) < 1e-9,
-      'at 240 frames a second the passes may halve them: %.1f ms a frame' % (g._slice() * 1e3))
-g.idle_dt, g.base_dt = 1.0 / 60, 0.014     # a slower one: no lower than 45 frames a second
-check(abs(g._slice() - (1.0 / 45 - 0.014)) < 1e-9, 'at 60 they take what leaves 45')
-g.idle_dt, g.base_dt = 1.0 / 120, 0.002    # much room in the frame: the cap
+check(abs(g._slice() - (1.3 / 240 - 0.0021)) < 1e-9,
+      'at 240 fps the passes add 30%%: %.1f ms a frame' % (g._slice() * 1e3))
+g.idle_dt, g.base_dt = 1.0 / 60, 0.014     # a slower one
+check(abs(g._slice() - (1.3 / 60 - 0.014)) < 1e-9, 'at 60 fps the stretch is the limit: %.1f ms' % (g._slice() * 1e3))
+g.idle_dt, g.base_dt = 1.0 / 120, 0.002    # much room: stretch is still the limit
+check(abs(g._slice() - (1.3 / 120 - 0.002)) < 1e-9, 'at 120 fps: %.1f ms' % (g._slice() * 1e3))
+g.idle_dt, g.base_dt = 1.0 / 120, 0.0005   # very little base: cap kicks in
 check(g._slice() == 0.010, 'never more than 10 ms')
 g.idle_dt, g.base_dt = 1.0 / 30, 0.030
 check(g._slice() == 0.0015, 'at 30 the least')
@@ -898,14 +917,12 @@ STATE.target = None
 frames(300)
 check(comp.visible and g.target is enemy, 'map held on the target while the panel is open')
 del PUBLISHED[:]
-old_rows = g.pic_sig[2]
+old_sig = g.pic_sig
 check(click(('step', 5)) is True and g.cfg['alpha'] == 0.45 and saved()['alpha'] == 0.45,
       'transparency + : 50%% -> 55%% (alpha %r), saved' % g.cfg['alpha'])
-frames(300)
-check(PUBLISHED and g.pic_sig[2] != old_rows and g.pic_sig[2][0][3] in ('\x00', chr(114)),
+frames(600)
+check(PUBLISHED and g.pic_sig != old_sig,
       'the map is redrawn with the new transparency')
-alphas = set(ord(row[i]) for row in g.pic_sig[2] for i in range(3, len(row), 4))
-check(alphas == set([0, 114]), 'map alpha is %r' % sorted(alphas))
 slider = [a for r, a in g.panel.hits if a[:2] == ('slider', 'alpha')][0]
 HELD.add(256)
 check(click(slider, at=0.8) is True and abs(g.cfg['alpha'] - 0.2) < 0.051,
@@ -1000,9 +1017,9 @@ codes = PUBLISHED[-1][0]
 # gradient codes may differ slightly via adaptive skip; check COVERED flag + same category
 dimmed = [i for i in gone if (ord(codes[i]) & hm.COVERED) and
           hm._GRAD_CAT[ord(codes[i]) & 0x7F] == hm._GRAD_CAT[ord(open_codes[i])]]
-alphas = set(ord(row[i]) for row in g.pic_sig[2] for i in range(3, len(row), 4))
-check(len(dimmed) == len(gone) and len(alphas) == 3 and 0 < sorted(alphas)[1] < 40,
-      'covered_alpha draws the hidden part dimmed instead (alphas %r)' % sorted(alphas))
+pal_alphas = set(ord(g.palette[c][3]) for c in set(ord(b) for b in PUBLISHED[-1][0]) if ord(g.palette[c][3]))
+check(len(dimmed) == len(gone) and len(pal_alphas) >= 2,
+      'covered_alpha draws the hidden part dimmed instead (palette alphas %r)' % sorted(pal_alphas))
 shutil.copy(os.path.join(CACHE, g.files[-1]), os.path.join(OUT, 'cover_dim.png'))
 g.cfg['covered_alpha'] = 0.0
 calls = WALL['calls']

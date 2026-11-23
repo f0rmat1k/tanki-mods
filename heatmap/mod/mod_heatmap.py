@@ -63,7 +63,6 @@ as on a fine one; it stays put while its place is nearly as good as the best one
 again without a new pass when the aim circle grows or shrinks.
 Known limit: the shot is a straight line from the gun (no ballistic drop).
 """
-import ctypes
 import json
 import math
 import operator
@@ -91,7 +90,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.15.0'
+__version__ = '0.15.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -526,47 +525,10 @@ def png_rgba(w, h, rows):
             chunk(b'IDAT', zlib.compress(raw, 1)) + chunk(b'IEND', b''))
 
 
-# ---- native acceleration ----
-
-_native = None
-
-
-def _load_native(cache_dir):
-    """Extract heatmap_fast.dll from the VFS and load it with ctypes."""
-    global _native
-    if _native is not None:
-        return
-    try:
-        dll_path = os.path.join(cache_dir, 'heatmap_fast.dll')
-        if not os.path.isfile(dll_path):
-            sec = ResMgr.openSection('mods/%s/heatmap_fast.dll' % MOD_ID)
-            if sec is None:
-                return
-            with open(dll_path, 'wb') as f:
-                f.write(sec.asBinary)
-        lib = ctypes.CDLL(dll_path)
-        fn = lib.grid_to_raw
-        fn.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int,
-                       ctypes.c_char_p, ctypes.c_char_p]
-        fn.restype = ctypes.c_int
-        _native = fn
-        log('native DLL loaded from %s' % dll_path)
-    except Exception:
-        log('native DLL not loaded', traceback.format_exc())
-
-
 def _png_from_codes(codes, gw, gh, palette):
-    """PNG from a codes grid + palette list; uses native DLL when available."""
-    if _native is not None:
-        pal_bytes = b''.join(palette[:256])
-        codes_bytes = bytes(codes)
-        out_size = (1 + gw * 4) * gh
-        out = ctypes.create_string_buffer(out_size)
-        _native(codes_bytes, gw, gh, pal_bytes, out)
-        raw = out.raw
-    else:
-        raw = b''.join([b'\x00' + b''.join([palette[c] for c in codes[j * gw:(j + 1) * gw]])
-                        for j in xrange(gh)])
+    """PNG from a codes grid + palette list."""
+    raw = b''.join([b'\x00' + b''.join([palette[c] for c in codes[j * gw:(j + 1) * gw]])
+                    for j in xrange(gh)])
     def chunk(tag, body):
         return (struct.pack('>I', len(body)) + tag + body +
                 struct.pack('>I', zlib.crc32(tag + body) & 0xFFFFFFFF))
@@ -2033,8 +1995,6 @@ class Heatmap(object):
                           if self.res_mods else None)
         self.files = []           # PNGs written and not yet removed, oldest first
         self.cache_ready = self._prepare_cache()
-        if self.cache_dir:
-            _load_native(self.cache_dir)
         self.comp = None
         self.counter = 0
         self.tick_cb = None
@@ -2204,7 +2164,7 @@ class Heatmap(object):
             self.pic = None
             self._hide()
             return
-        sig = (gw, gh, bytes(codes))
+        sig = (gw, gh, bytes(codes), id(self.palette))
         if sig != self.pic_sig or self.comp is None:
             self._component(self._write_png(_png_from_codes(codes, gw, gh, self.palette)))
             self.pic_sig = sig
