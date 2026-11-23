@@ -27,14 +27,13 @@ the target's box on the screen every frame. There are two kinds of pass:
 the mouse only slides the picture and keeps the fine map. The cost of a cell is measured in
 every pass and kept between battles in the settings file.
 
-Two independent sliders: `resolution` (0 coarse to 100 fine, grid detail) and `speed`
-(0 slow to 100 fast, update rate in motion). Each goes from 0 to 100 in steps of 5.
-resolution_grid() and speed_rate() map them to grid dimensions and updates per second.
+One slider: `quality` (1 speed to 10 quality) controls both the grid detail and the update
+rate together. quality_params() maps it to resolution_grid() and speed_rate() values.
 How much of a frame the passes may take is not asked: they may make a frame twice as long as
 it is without them, as measured on the frames between passes and kept between battles, but not
 bring the game below 45 frames a second (Heatmap._slice).
 For fine tuning a number in grid_w, grid_h, min_cell_px, updates_per_sec or slice_ms of the
-settings file replaces what the sliders give; null takes it from the slider. The file is read
+settings file replaces what the slider gives; null takes it from the slider. The file is read
 again at the start of every battle.
 
 The picture is a PNG in res_mods/<client>/mods/heatmap_cache shown with GUI.Simple. paths.xml
@@ -42,7 +41,7 @@ mounts res_mods with cacheSubdirs, so the folder must exist before the game star
 (build_mod.py --install creates it; the mod creates it too, then one restart is needed).
 
 Ctrl+Shift+H in battle turns the heatmap on and off. Ctrl+Shift+G, in the hangar or in battle,
-opens the settings panel: on / off, speed or quality, transparency, cover, the best point,
+opens the settings panel: on / off, speed-quality balance, transparency, cover, the best point,
 allies. Like the heatmap it
 is a PNG the mod draws itself and shows with GUI.Simple; mouse clicks are hit-tested against it.
 In battle the game shows the cursor while Ctrl is held, and the map stays on the last target
@@ -90,23 +89,44 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.15.1'
+import sys as _sys
+_grid_to_raw_native = None
+try:
+    _pyd_sec = ResMgr.openSection('mods/heatmap/heatmap_fast.pyd')
+    if _pyd_sec is not None:
+        _td = os.path.join(os.environ.get('TEMP', '.'), 'hm_native')
+        if not os.path.isdir(_td):
+            os.makedirs(_td)
+        _pyd_path = os.path.join(_td, 'heatmap_fast.pyd')
+        with open(_pyd_path, 'wb') as _f:
+            _f.write(str(_pyd_sec.asBinary))
+        _sys.path.insert(0, _td)
+        try:
+            from heatmap_fast import grid_to_raw as _grid_to_raw_native
+        except ImportError:
+            pass
+        finally:
+            if _td in _sys.path:
+                _sys.path.remove(_td)
+    del _pyd_sec
+except Exception:
+    pass
+
+__version__ = '0.16.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
 DEFAULTS = {
-    '_help': ('resolution: 0 (coarse grid) to 100 (fine grid, up to 512x384 cells); '
-              'speed: 0 (5 updates/sec in motion) to 100 (30 updates/sec). Both sliders are in '
-              'the settings panel, Ctrl+Shift+G. For fine tuning a number in grid_w, grid_h (up '
-              'to 512), min_cell_px, updates_per_sec (1-30) or slice_ms (most milliseconds of '
-              'work per frame; null: found from the frame rate) replaces what the sliders give, '
-              'null takes it from them. Moving a slider puts null back into its numbers'),
+    '_help': ('quality: 1 (speed, coarse grid, rare updates) to 10 (quality, fine grid, '
+              'frequent updates); default 5. The slider is in the settings panel, Ctrl+Shift+G. '
+              'For fine tuning a number in grid_w, grid_h (up to 512), min_cell_px, '
+              'updates_per_sec (1-30) or slice_ms (most milliseconds of work per frame; null: '
+              'found from the frame rate) replaces what the slider gives, null takes it from '
+              'the slider. Moving the slider puts null back into its numbers'),
     '_cell_cost_us': None,    # microseconds a cell costs on this computer: measured, not set
     '_frame_ms': None,        # milliseconds between frames without the mod: measured, not set
     'enabled': True,
-    'balance': None,           # legacy: replaced by resolution + speed; migrated on load
-    'resolution': 50,         # 0 coarse (64x48) ... 100 fine (512x384): grid detail
-    'speed': 50,              # 0 slow (5/sec) ... 100 fast (30/sec): update rate in motion
+    'quality': 5,             # 1 speed (coarse, rare) ... 10 quality (fine, frequent)
     'grid_w': None,           # most cells across the target (the fine map) ...
     'grid_h': None,           # ... and down; cells are square, a far target gets fewer
     'min_cell_px': None,      # a cell is never smaller than this on the screen
@@ -133,19 +153,18 @@ DEFAULTS = {
     'debug': False,
 }
 
-# resolution slider: (grid_w, min_cell_px) at each end. The grid is only full on a target that
-# is large on the screen: cells never get smaller than min_cell_px
-RES_COARSE = (64, 3.0)       # resolution = 0
-RES_FINE = (512, 1.0)        # resolution = 100 (raised from 256 after the 8x optimization)
-# speed slider: updates per second of moving targets at each end
-SPEED_SLOW = 5.0              # speed = 0
-SPEED_FAST = 30.0             # speed = 100
+# quality slider internal ends: (grid_w, min_cell_px) and updates per second.
+# The grid is only full on a target that is large on the screen: cells never get smaller
+# than min_cell_px.  quality 1 (speed) uses the coarse/slow ends, 10 (quality) the fine/fast.
+RES_COARSE = (64, 3.0)       # quality 1 grid
+RES_FINE = (512, 1.0)        # quality 10 grid (raised from 256 after the 8x optimization)
+SPEED_SLOW = 5.0              # quality 1 updates per second
+SPEED_FAST = 30.0             # quality 10 updates per second
 GRID_ASPECT = 0.75            # grid_h over grid_w
-SLIDER_STEP = 5               # both sliders' step
 # the quality presets of 0.2 - 0.5.1 as places on that scale
 OLD_QUALITY = {'low': 15, 'medium': 30, 'high': 50, 'ultra': 60, 'max': 75}
 # settings of earlier versions that are gone
-GONE_KEYS = ('quality', 'smooth', 'refresh_period')
+GONE_KEYS = ('smooth', 'refresh_period', 'balance', 'resolution', 'speed')
 TUNING_KEYS = ('grid_w', 'grid_h', 'min_cell_px', 'slice_ms', 'updates_per_sec')
 # (lowest, highest) a setting may be, whatever the file says
 TUNING_LIMITS = ((4, 512), (4, 512), (1.0, 64.0), (0.05, 50.0), (1.0, 30.0))
@@ -192,7 +211,7 @@ COLOR_KEYS = (None, 'pen', 'marginal', 'no_pen', 'ricochet', 'no_damage')
 TRACE_BACK = 0.1
 TRACE_FORWARD = 20.0
 # the camera ray is reused as the shot when the gun sees the point at nearly the same angle (0.5 deg)
-PARALLAX_COS = math.cos(math.radians(0.5))
+PARALLAX_COS = math.cos(math.radians(2.0))
 MAX_HIT_ANGLE = math.pi / 2.0 - 1e-05
 
 
@@ -364,27 +383,42 @@ def _load_config(root):
             # settings added since the file was written go into it, so they can be found there,
             # and settings that are gone leave it
             rewrite = bool(set(DEFAULTS) - set(user)) or bool(set(GONE_KEYS) & set(user))
-            if 'balance' not in user and 'resolution' not in user:
-                # a file of 0.1 - 0.5.1: its quality preset becomes a place on the scale, and
-                # the numbers its panel wrote step aside, or the slider would not be heard
-                old = OLD_QUALITY.get(str(user.get('quality')).strip().lower())
+            # a numeric quality (1-10) means a 0.16+ file: skip all migration
+            has_quality = isinstance(user.get('quality'), (int, float))
+            # a file of 0.1 - 0.5.1: a string quality preset and individual tuning numbers
+            if not has_quality and 'balance' not in user and 'resolution' not in user:
+                old = OLD_QUALITY.get(str(user.get('quality', '')).strip().lower())
                 if old is not None:
                     user['balance'] = old
                 for key in TUNING_KEYS:
                     user.pop(key, None)
-            # migrate old balance to resolution + speed (0.9.0 -> 0.10.0)
-            if 'resolution' not in user and 'speed' not in user:
+            # migrate balance to resolution + speed (0.6-0.9)
+            if not has_quality and 'resolution' not in user and 'speed' not in user:
                 bal = user.get('balance')
                 if bal is not None:
                     try:
                         r, s = _migrate_balance(float(bal))
                         user['resolution'] = r
                         user['speed'] = s
+                    except (TypeError, ValueError):
+                        pass
+            # migrate resolution + speed to quality (0.10-0.15 -> 0.16)
+            if not has_quality:
+                res_val = user.get('resolution')
+                spd_val = user.get('speed')
+                if res_val is not None or spd_val is not None:
+                    try:
+                        user['quality'] = _migrate_res_speed_to_quality(
+                            float(res_val if res_val is not None else 50),
+                            float(spd_val if spd_val is not None else 50))
                         rewrite = True
                     except (TypeError, ValueError):
                         pass
             for key in GONE_KEYS:
                 user.pop(key, None)
+            # an old string quality that slipped through
+            if not isinstance(user.get('quality'), (int, float)):
+                user.pop('quality', None)
             colors = user.pop('colors', None)
             cfg.update(user)
             if isinstance(colors, dict):
@@ -415,6 +449,19 @@ def speed_rate(spd_val):
     return round(SPEED_SLOW * (SPEED_FAST / SPEED_SLOW) ** b, 1)
 
 
+def quality_params(quality):
+    """(resolution_val, speed_val) for a quality slider value 1-10."""
+    t = (min(max(float(quality), 1.0), 10.0) - 1.0) / 9.0
+    val = t * 100.0
+    return val, val
+
+
+def _migrate_res_speed_to_quality(res_val, spd_val):
+    """Convert old resolution (0-100) and speed (0-100) to quality 1-10."""
+    avg = (min(max(float(res_val), 0.0), 100.0) + min(max(float(spd_val), 0.0), 100.0)) / 2.0
+    return int(min(max(round(avg * 9.0 / 100.0 + 1.0), 1), 10))
+
+
 def _migrate_balance(balance):
     """Convert old balance (0-100) to (resolution, speed) slider values."""
     b = min(max(float(balance), 0.0), 100.0) / 100.0
@@ -428,29 +475,14 @@ def _migrate_balance(balance):
 
 def resolution(cfg):
     """(label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec,
-    resolution_val, speed_val) the settings ask for: what the two sliders give, with the
+    quality) the settings ask for: what the quality slider gives, with the
     numbers given in the file put over them.  slice_ms None: found from the frame rate."""
-    # read the two sliders; fall back to balance if they are absent
-    res_val = cfg.get('resolution')
-    spd_val = cfg.get('speed')
-    if res_val is None or spd_val is None:
-        try:
-            balance = float(cfg.get('balance'))
-            mig_r, mig_s = _migrate_balance(balance)
-            if res_val is None:
-                res_val = mig_r
-            if spd_val is None:
-                spd_val = mig_s
-        except (TypeError, ValueError):
-            pass
+    qual = cfg.get('quality')
     try:
-        res_val = min(max(float(res_val), 0.0), 100.0)
+        qual = min(max(int(qual), 1), 10)
     except (TypeError, ValueError):
-        res_val = float(DEFAULTS['resolution'])
-    try:
-        spd_val = min(max(float(spd_val), 0.0), 100.0)
-    except (TypeError, ValueError):
-        spd_val = float(DEFAULTS['speed'])
+        qual = DEFAULTS['quality']
+    res_val, spd_val = quality_params(qual)
     gw, gh, cell = resolution_grid(res_val)
     rate = speed_rate(spd_val)
     presets = (gw, gh, cell, None, rate)
@@ -468,9 +500,9 @@ def resolution(cfg):
                 log('bad %s %r in the settings: using %s' % (key, value, preset))
                 value = preset
         values.append(value)
-    return ('res %g + spd %g%s' % (res_val, spd_val, ' + own numbers' if custom else ''),
+    return ('quality %d%s' % (qual, ' + own numbers' if custom else ''),
             int(values[0]), int(values[1]), float(values[2]), values[3], float(values[4]),
-            res_val, spd_val)
+            qual)
 
 
 def _save_config(root, cfg):
@@ -527,8 +559,11 @@ def png_rgba(w, h, rows):
 
 def _png_from_codes(codes, gw, gh, palette):
     """PNG from a codes grid + palette list."""
-    raw = b''.join([b'\x00' + b''.join([palette[c] for c in codes[j * gw:(j + 1) * gw]])
-                    for j in xrange(gh)])
+    if _grid_to_raw_native is not None:
+        raw = _grid_to_raw_native(str(codes), gw, gh, b''.join(palette))
+    else:
+        raw = b''.join([b'\x00' + b''.join([palette[c] for c in codes[j * gw:(j + 1) * gw]])
+                        for j in xrange(gh)])
     def chunk(tag, body):
         return (struct.pack('>I', len(body)) + tag + body +
                 struct.pack('>I', zlib.crc32(tag + body) & 0xFFFFFFFF))
@@ -961,7 +996,7 @@ P_BUTTON = (59, 63, 69, 255)
 LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_pen', u'нет'),
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
-PANEL_DEFAULTS = ('enabled', 'resolution', 'speed') + TUNING_KEYS + ('alpha', 'hide_covered',
+PANEL_DEFAULTS = ('enabled', 'quality') + TUNING_KEYS + ('alpha', 'hide_covered',
                   'best_point', 'show_allies', 'show_all_visible', 'xray')
 TRANSPARENCY_STEP = 5     # percent
 
@@ -1077,13 +1112,12 @@ def render_panel(cfg, res, font, measured=None):
     the last passes of this battle, as far as there were any.
 
     Actions: ('toggle', key), ('step', percent) of transparency, ('slider', key, x0, x1) with
-    the track's ends, for 'alpha', 'resolution' and 'speed', ('cycle_xray',), ('reset',),
-    ('close',).
+    the track's ends, for 'alpha' and 'quality', ('cycle_xray',), ('reset',), ('close',).
     """
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 12 + P_HINT_ROW + P_FOOTER
+    h = P_HEADER + 8 + ROW * 11 + P_HINT_ROW + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -1118,20 +1152,13 @@ def render_panel(cfg, res, font, measured=None):
     toggle(y, 'enabled', u'Тепловая карта включена')
     y += ROW
 
-    # resolution slider: grid detail
-    coarse, fine = u'Грубее', u'Детальнее'
-    c.text(font, PAD, mid(y, y + ROW), coarse, P_TEXT)
-    c.text(font, W - PAD - width(fine), mid(y, y + ROW), fine, P_TEXT)
-    slider(y, 'resolution', (PAD + width(coarse) + 14, y + 11,
-                              W - PAD - width(fine) - 14, y + ROW - 11), res[6] / 100.0)
-    y += ROW
-
-    # speed slider: update rate in motion
-    slower, faster = u'Реже', u'Чаще'
-    c.text(font, PAD, mid(y, y + ROW), slower, P_TEXT)
-    c.text(font, W - PAD - width(faster), mid(y, y + ROW), faster, P_TEXT)
-    slider(y, 'speed', (PAD + width(slower) + 14, y + 11,
-                         W - PAD - width(faster) - 14, y + ROW - 11), res[7] / 100.0)
+    # quality slider: speed ← → quality
+    speed_l, quality_l = u'Скорость', u'Качество'
+    c.text(font, PAD, mid(y, y + ROW), speed_l, P_TEXT)
+    c.text(font, W - PAD - width(quality_l), mid(y, y + ROW), quality_l, P_TEXT)
+    slider(y, 'quality', (PAD + width(speed_l) + 14, y + 11,
+                           W - PAD - width(quality_l) - 14, y + ROW - 11),
+           (res[6] - 1) / 9.0)
     y += ROW
 
     parts = []
@@ -1142,9 +1169,9 @@ def render_panel(cfg, res, font, measured=None):
     if parts:
         hint = u'; '.join(parts)
     elif res[0].endswith('own numbers'):
-        hint = u'часть чисел задана в файле настроек; ползунки их сбросят'
+        hint = u'часть чисел задана в файле настроек; ползунок их сбросит'
     else:
-        hint = u'разрешение — детальность сетки, скорость — частота обновления'
+        hint = u'детальность сетки и частота обновления зависят от ползунка'
     c.text(font, PAD, y + 2, hint, P_HINT)
     y += P_HINT_ROW
 
@@ -1437,12 +1464,12 @@ class Panel(object):
         percent = (x - x0) * 100.0 / (x1 - x0)
         if key == 'alpha':
             return {'alpha': alpha_of(percent)}
-        val = min(max(int(round(percent / SLIDER_STEP)) * SLIDER_STEP, 0), 100)
-        if key == 'resolution':
-            return {'resolution': val, 'grid_w': None, 'grid_h': None, 'min_cell_px': None}
-        if key == 'speed':
-            return {'speed': val, 'slice_ms': None, 'updates_per_sec': None}
-        return {key: val}
+        if key == 'quality':
+            q = int(round(percent / 100.0 * 9.0 + 1.0))
+            q = min(max(q, 1), 10)
+            return {'quality': q, 'grid_w': None, 'grid_h': None, 'min_cell_px': None,
+                    'slice_ms': None, 'updates_per_sec': None}
+        return {key: percent}
 
     def _drag_step(self):
         """Every frame while the button is held on the track: the knob follows the cursor."""
@@ -1987,7 +2014,7 @@ class Heatmap(object):
     def __init__(self):
         self.root = _game_root()
         self.cfg = _load_config(self.root)
-        # (label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec, res_val, spd_val)
+        # (label, grid_w, grid_h, min_cell_px, slice_ms or None, updates_per_sec, quality)
         self.res = resolution(self.cfg)
         self.res_mods = _res_mods_dir(self.root)
         self.cache_vfs = 'mods/%s_cache' % MOD_ID
@@ -2042,7 +2069,8 @@ class Heatmap(object):
         self._sec_robin = 0       # round-robin index for time-slicing among secondaries
         self.xrays = {}           # entity id -> XrayOverlay (enemies behind walls)
         self._xray_robin = 0
-        log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
+        log('v%s loaded; cache=%s native=%s' % (__version__, self.cache_dir,
+            'yes' if _grid_to_raw_native else 'no'))
 
     # ---- files ----
 
@@ -2661,7 +2689,7 @@ class Heatmap(object):
                     else:
                         cat = -2
 
-            if n_ok >= 2 and cat > 0:
+            if n_ok >= 2 and cat > 0 or n_ok >= 3 and cat == 0:
                 # all checked neighbours agree: fill without casting
                 codes[idx] = nbr
                 done_mask[idx] = 1
@@ -3117,16 +3145,16 @@ class Heatmap(object):
     def _resolution_text(self):
         """The settings in use and where to change them, for python.log."""
         name, grid_w, grid_h, min_cell, slice_ms, rate = self.res[:6]
-        res_val, spd_val = self.res[6], self.res[7]
+        quality = self.res[6]
         if slice_ms is None:
             budget = '%.1f ms of work per frame, found from the frame rate' % (self._slice() * 1e3)
         else:
             budget = '%g ms of work per frame, as set' % slice_ms
-        return ('resolution=%g speed=%g: up to %dx%d cells when nothing moves, a cell at '
+        return ('quality=%d: up to %dx%d cells when nothing moves, a cell at '
                 'least %g px; %g updates a second while something moves, with as coarse a grid '
-                'as that takes at %s and %.1f us per cell. Two sliders in the panel, '
+                'as that takes at %s and %.1f us per cell. The slider is in the panel, '
                 'Ctrl+Shift+G; the numbers can be set one by one in %s (read at the start of a '
-                'battle)' % (res_val, spd_val, grid_w, grid_h, min_cell, rate, budget,
+                'battle)' % (quality, grid_w, grid_h, min_cell, rate, budget,
                              self.cost * 1e6, os.path.join(self.root, CONFIG_PATH)))
 
     def on_battle_end(self):

@@ -533,13 +533,14 @@ check(os.path.isfile(os.path.join(ROOT, 'mods', 'configs', 'heatmap', 'heatmap.j
       'default config written')
 import json  # noqa: E402
 saved = json.load(open(CONFIG))
-res50 = hm.resolution_grid(50)
-spd50 = hm.speed_rate(50)
-check(g.res == ('res 50 + spd 50', res50[0], res50[1], res50[2], None, spd50, 50.0, 50.0),
-      '0.1.0 settings file: the middle of the scale %r' % (g.res,))
-check(saved['resolution'] == 50 and saved['speed'] == 50 and saved['grid_w'] is None
+q5r, q5s = hm.quality_params(5)
+res5 = hm.resolution_grid(q5r)
+spd5 = hm.speed_rate(q5s)
+check(g.res == ('quality 5', res5[0], res5[1], res5[2], None, spd5, 5),
+      '0.1.0 settings file: quality 5 %r' % (g.res,))
+check(saved['quality'] == 5 and saved['grid_w'] is None
       and saved['slice_ms'] is None and '_help' in saved and saved['alpha'] == 0.5,
-      'settings file rewritten with resolution and speed')
+      'settings file rewritten with quality')
 orig_publish = g._publish
 
 
@@ -687,6 +688,7 @@ check(g.last_key is not None and g.last_key[1], 'a fine pass completed')
 # now invalidate and use a tiny slice so the NEXT fine pass stays in progress
 g.last_key = (g.last_key[0], False)  # mark last pass as not-full to trigger fine pass
 g.res = g.res[:4] + (0.5,) + g.res[5:]   # 0.5ms slice
+g.next_pass = 0.0                         # do not wait for the update interval
 _clock_step[0] = 50e-6   # mock clock: each call advances 50us so the deadline fires
 frames(8)
 _clock_step[0] = 0.0     # back to real clock
@@ -811,32 +813,34 @@ def battle_with(**settings):
 
 
 grids = {}
-for r in (0, 50, 100):
-    grids[r] = battle_with(resolution=r, speed=50)
-    rg = hm.resolution_grid(r)
-    sr = hm.speed_rate(50)
-    print('     resolution %-3d -> res %r, grid %r' % (r, g.res, grids[r]))
-    check(g.res == ('res %g + spd 50' % r, rg[0], rg[1], rg[2], None, sr, float(r), 50.0),
-          'resolution %d read from the file' % r)
+for q in (1, 5, 10):
+    grids[q] = battle_with(quality=q)
+    rv, sv = hm.quality_params(q)
+    rg = hm.resolution_grid(rv)
+    sr = hm.speed_rate(sv)
+    print('     quality %-2d -> res %r, grid %r' % (q, g.res, grids[q]))
+    check(g.res == ('quality %d' % q, rg[0], rg[1], rg[2], None, sr, q),
+          'quality %d read from the file' % q)
 check(hm.resolution_grid(0) == (64, 48, 3.0)
       and hm.resolution_grid(100) == (512, 384, 1.0), 'the resolution scale: coarse to fine')
 check(hm.speed_rate(0) == 5.0 and hm.speed_rate(100) == 30.0, 'the speed scale: slow to fast')
-check(grids[0][0] < grids[50][0] < grids[100][0] and grids[100][0] > 150,
-      'towards fine the grid gets finer')
-check(battle_with(resolution=100, speed=50, grid_w=300, grid_h=300) is not None
+check(grids[1][0] < grids[5][0] < grids[10][0] and grids[10][0] > 150,
+      'towards quality the grid gets finer')
+check(battle_with(quality=10, grid_w=300, grid_h=300) is not None
       and g.res[0].endswith('own numbers') and g.res[1] == 300 and g.res[2] == 300
       and PUBLISHED[-1][1] > 150, 'a 300x300 grid can be set by hand')
-rg60 = hm.resolution_grid(60)
-check(battle_with(resolution=60, speed=50, grid_w=100, grid_h=None, min_cell_px=3, slice_ms=5,
+q7r, q7s = hm.quality_params(7)
+rg7 = hm.resolution_grid(q7r)
+check(battle_with(quality=7, grid_w=100, grid_h=None, min_cell_px=3, slice_ms=5,
                   updates_per_sec=9) is not None
-      and g.res[1] == 100 and g.res[2] == rg60[1] and g.res[3] == 3.0 and g.res[4] == 5.0
+      and g.res[1] == 100 and g.res[2] == rg7[1] and g.res[3] == 3.0 and g.res[4] == 5.0
       and g.res[5] == 9.0 and g._slice() == 0.005,
       'numbers in the file replace what the scale gives')
-check(battle_with(resolution='best', speed='bad', grid_w=None, min_cell_px=None, slice_ms=None,
+check(battle_with(quality='best', grid_w=None, min_cell_px=None, slice_ms=None,
                   updates_per_sec=None) is not None
-      and g.res[6] == 50.0 and g.res[7] == 50.0, 'bad slider values fall back to the middle')
-check(battle_with(resolution=50, speed=50, grid_w=100000, slice_ms='fast') is not None
-      and g.res[1] == 512 and g.res[6] == 50.0,
+      and g.res[6] == 5, 'bad quality value falls back to the default')
+check(battle_with(quality=5, grid_w=100000, slice_ms='fast') is not None
+      and g.res[1] == 512 and g.res[6] == 5,
       'bad numbers are clamped or dropped')
 battle_with(grid_w=None, slice_ms=None)
 # the work per frame is found from what a frame takes without the mod, and kept
@@ -871,7 +875,7 @@ def driving(seconds, **settings):
     return len(PUBLISHED) / float(seconds), sum(cells) / float(len(cells) or 1)
 
 
-rate5, cells5 = driving(3, resolution=75, speed=50, slice_ms=8, updates_per_sec=5)
+rate5, cells5 = driving(3, quality=8, slice_ms=8, updates_per_sec=5)
 check(set(kinds()) == set(['fast']), 'driving: fast passes only')
 rate10, cells10 = driving(3, updates_per_sec=10)
 print('     driving at max: %.1f passes a second of %d cells, %.1f of %d cells'
@@ -883,7 +887,7 @@ EVENTS.onAvatarBecomeNonPlayer()   # flush cost to file
 stored = json.load(open(CONFIG))['_cell_cost_us']
 check(5.0 < stored < 2000.0 and abs(g.cost * 1e6 - stored) < 0.3 * stored,
       'the cost of a cell is kept in the settings file (%.1f us here)' % stored)
-battle_with(resolution=50, speed=50, grid_w=None, slice_ms=None, updates_per_sec=None)
+battle_with(quality=5, grid_w=None, slice_ms=None, updates_per_sec=None)
 
 # ---- the settings panel ----
 PANEL_KEY = KeyEvent(34, ctrl=True, shift=True)
@@ -938,18 +942,16 @@ frames(2)
 CURSOR.position = (0.9, CURSOR.position[1])
 frames(3)
 check(g.cfg['alpha'] == 0.7 and g.panel.slider is None, 'drag ends when the button is released')
-# the resolution and speed sliders
-def res_slider():
-    return [a for r, a in g.panel.hits if a[:2] == ('slider', 'resolution')][0]
-
-def spd_slider():
-    return [a for r, a in g.panel.hits if a[:2] == ('slider', 'speed')][0]
+# the quality slider
+def q_slider():
+    return [a for r, a in g.panel.hits if a[:2] == ('slider', 'quality')][0]
 
 
-rg80 = hm.resolution_grid(80)
-check(click(res_slider(), at=0.8) is True and g.cfg['resolution'] == 80
-      and saved()['resolution'] == 80 and g.res[1] == rg80[0] and g.res[2] == rg80[1],
-      'a click on the resolution slider (%r)' % (g.res,))
+q9r, q9s = hm.quality_params(9)
+rg9 = hm.resolution_grid(q9r)
+check(click(q_slider(), at=8.0 / 9.0) is True and g.cfg['quality'] == 9
+      and saved()['quality'] == 9 and g.res[1] == rg9[0] and g.res[2] == rg9[1],
+      'a click on the quality slider (%r)' % (g.res,))
 HELD.clear()
 frames(2)
 del PUBLISHED[:]
@@ -958,29 +960,26 @@ check(PUBLISHED and kinds()[-1] == 'fine' and PUBLISHED[-1][1] > 100,
       'the map is recast finer at once (%r)' % (PUBLISHED[-1][1:3],))
 check('fast' in g.measured and 'fine' in g.measured and not g.report,
       'the panel shows the measured passes')
-panel_png('panel_resolution.png')
+panel_png('panel_quality.png')
 g.apply_settings({'updates_per_sec': 9, 'slice_ms': 3})
 check(g.res[0].endswith('own numbers'), 'numbers set by hand show')
 panel_png('panel_own.png')
 HELD.add(256)
-check(click(res_slider(), at=0.2) is True and g.cfg['resolution'] == 20
-      and saved()['grid_w'] is None and saved()['grid_h'] is None,
-      'moving the resolution slider puts its grid numbers aside')
-bar = res_slider()
+check(click(q_slider(), at=2.0 / 9.0) is True and g.cfg['quality'] == 3
+      and saved()['grid_w'] is None and saved()['grid_h'] is None
+      and saved()['slice_ms'] is None and saved()['updates_per_sec'] is None,
+      'moving the quality slider puts all tuning numbers aside')
+bar = q_slider()
 x = g.panel.rect[0] + bar[2] + (bar[3] - bar[2]) * 1.2
 CURSOR.position = (x / 960.0 - 1.0, CURSOR.position[1])
 frames(3)
-check(g.cfg['resolution'] == 100 and saved()['resolution'] == 100, 'dragging it past the end: 100')
+check(g.cfg['quality'] == 10 and saved()['quality'] == 10, 'dragging it past the end: 10')
 HELD.clear()
 frames(2)
 check(g.panel.slider is None, 'the drag ends')
-# the speed slider clears the speed overrides
-check(click(spd_slider(), at=0.5) is True and g.cfg['speed'] == 50
-      and saved()['updates_per_sec'] is None and saved()['slice_ms'] is None
-      and 'own numbers' not in g.res[0], 'moving the speed slider puts its numbers aside')
-# speed slider to a custom value
-check(click(spd_slider(), at=0.6) is True and g.cfg['speed'] == 60
-      and saved()['speed'] == 60, 'a click on the speed slider')
+# back to quality 5 for cover checks
+check(click(q_slider(), at=4.0 / 9.0) is True and g.cfg['quality'] == 5
+      and 'own numbers' not in g.res[0], 'moving the quality slider clears overrides')
 check(click(('toggle', 'show_allies')) is True and g.cfg['show_allies'] is True, 'allies toggle')
 check(click(('toggle', 'show_all_visible')) is True and g.cfg['show_all_visible'] is True,
       'show_all_visible toggle on')
@@ -988,8 +987,6 @@ check(click(('toggle', 'show_all_visible')) is True and g.cfg['show_all_visible'
       'show_all_visible toggle off')
 
 # cover: a wall hides the left part of the target (the panel is still open, the map is held)
-check(click(res_slider(), at=0.5) is True and g.cfg['resolution'] == 50, 'the middle for the cover checks')
-check(click(spd_slider(), at=0.5) is True and g.cfg['speed'] == 50, 'speed middle for the cover checks')
 frames(2)
 del PUBLISHED[:]
 frames(600)
@@ -1169,7 +1166,7 @@ check(click(('toggle', 'enabled')) is True and not g.cfg['enabled'] and not comp
       'off from the panel hides the map')
 panel_png('panel_off.png')
 check(click(('reset',)) is True and g.cfg['enabled'] and g.cfg['alpha'] == 0.5
-      and g.res[6] == 50.0 and g.res[7] == 50.0 and g.cfg['hide_covered']
+      and g.res[6] == 5 and g.cfg['hide_covered']
       and not g.cfg['show_allies'] and not g.cfg['show_all_visible'],
       'defaults button')
 check(click(('reset',), down=False) is True, 'release over the panel is taken too')
@@ -1204,11 +1201,11 @@ check(game.handleKeyEvent(key) is False, 'Ctrl+Shift+H does nothing in the hanga
 check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel opens in the hangar')
 check(click(('step', -5)) is True and g.cfg['alpha'] == 0.55 and saved()['alpha'] == 0.55,
       'transparency - in the hangar')
-check(click(res_slider(), at=0.3) and saved()['resolution'] == 30, 'the resolution slider in the hangar')
+check(click(q_slider(), at=3.0 / 9.0) and saved()['quality'] == 4, 'the quality slider in the hangar')
 panel_png('panel_hangar.png')
 STATE.player = avatar
 EVENTS.onAvatarReady()
-check(not g.panel.visible and g.res[6] == 30.0 and g.cfg['alpha'] == 0.55,
+check(not g.panel.visible and g.res[6] == 4 and g.cfg['alpha'] == 0.55,
       'hangar settings are used in the next battle')
 STATE.target = enemy
 frames(600)
@@ -1218,7 +1215,7 @@ check(len(ROOTS) == 1 and ROOTS[0].visible, 'map in that battle')
 g.panel._font = hm._MISSING
 FONT['on'] = False
 check(game.handleKeyEvent(PANEL_KEY) is True and g.panel.visible, 'panel without a font')
-check(click(res_slider(), at=0.5) is True and g.res[6] == 50.0, 'and it works')
+check(click(q_slider(), at=4.0 / 9.0) is True and g.res[6] == 5, 'and it works')
 panel_png('panel_nofont.png')
 game.handleKeyEvent(KeyEvent(1))
 # find_best on drawn grids: G pierced, y close call, r not pierced, . beside the vehicle
@@ -1263,7 +1260,7 @@ ENTITIES[enemy3.id] = enemy3
 check('show_all_visible' in hm.DEFAULTS and hm.DEFAULTS['show_all_visible'] is False,
       'show_all_visible default is False')
 # with the feature off, only the primary
-battle_with(show_all_visible=False, best_point=False, resolution=50, speed=50)
+battle_with(show_all_visible=False, best_point=False, quality=5)
 STATE.target = enemy
 frames(600)
 check(len(g.secondaries) == 0, 'no secondaries when show_all_visible is off')
@@ -1391,28 +1388,30 @@ EVENTS.onAvatarReady()
 STATE.target = enemy
 frames(600)
 
-# settings files of earlier versions: the quality preset becomes a place on the scale, and the
-# numbers the old panel wrote do not outvote the slider
-# legacy quality preset migration: quality -> balance -> resolution + speed
+# settings files of earlier versions: the quality preset becomes a place on the new scale, and
+# the numbers the old panel wrote do not outvote the slider
+# legacy quality preset migration: quality -> balance -> resolution + speed -> quality 1-10
 with open(CONFIG, 'w') as f:
     json.dump({'quality': 'max', 'updates_per_sec': 15, 'slice_ms': 8, 'grid_w': 192,
                'refresh_period': 0.25, 'smooth': True, 'alpha': 0.3, 'best_point': False}, f)
 cfg = hm._load_config(ROOT)
-# quality max -> balance 75 -> migration to resolution + speed
+# quality max -> balance 75 -> resolution + speed -> numeric quality
 check(cfg['alpha'] == 0.3 and cfg['best_point'] is False
       and [cfg[k] for k in hm.TUNING_KEYS] == [None] * 5, 'quality max: numbers dropped')
 mig_r, mig_s = hm._migrate_balance(75)
-check(cfg['resolution'] == mig_r and cfg['speed'] == mig_s,
-      'quality max -> balance 75 -> resolution %d, speed %d' % (mig_r, mig_s))
-check(not set(('quality', 'smooth', 'refresh_period')) & (set(cfg) | set(saved())),
+mig_q = hm._migrate_res_speed_to_quality(mig_r, mig_s)
+check(cfg['quality'] == mig_q,
+      'quality max -> balance 75 -> res/spd -> quality %d' % mig_q)
+check(not set(('smooth', 'refresh_period', 'balance', 'resolution', 'speed')) & (set(cfg) | set(saved())),
       'settings that are gone leave the file')
 # a file with balance and an explicit number: the number stays through migration
 with open(CONFIG, 'w') as f:
     json.dump({'balance': 40, 'updates_per_sec': 9}, f)
 cfg = hm._load_config(ROOT)
 mig_r2, mig_s2 = hm._migrate_balance(40)
-check(cfg['resolution'] == mig_r2 and cfg['speed'] == mig_s2 and cfg['updates_per_sec'] == 9,
-      'balance 40 migrated, numbers next to it are kept')
+mig_q2 = hm._migrate_res_speed_to_quality(mig_r2, mig_s2)
+check(cfg['quality'] == mig_q2 and cfg['updates_per_sec'] == 9,
+      'balance 40 migrated to quality %d, numbers next to it are kept' % mig_q2)
 hm.fini()
 check(not ROOTS and not STATE.callbacks, 'fini cleans up')
 shutil.rmtree(TEMP, ignore_errors=True)
