@@ -584,7 +584,7 @@ counts = [codes.count(chr(c)) for c in range(6)]
 for gc in range(hm.GRAD_BASE, hm.GRAD_BASE + hm.GRAD_COUNT):
     counts[hm.MARGINAL] += codes.count(chr(gc))
 print('     grid %dx%d, cells miss/pen/marginal/no_pen/ricochet/no_damage: %s' % (gw, gh, counts))
-check(100 < gw <= 128 and gh <= 96, 'cells of 2 px at the middle of the scale: %dx%d' % (gw, gh))
+check(80 < gw <= 128 and gh <= 96, 'cells of about 2 px at the middle of the scale: %dx%d' % (gw, gh))
 check(counts[hm.PEN] > 20 and counts[hm.NO_PEN] > 20 and counts[hm.NO_DAMAGE] > 5,
       'penetrated, not penetrated and no-damage cells present')
 # gradient: marginal cells use codes GRAD_BASE..GRAD_BASE+GRAD_COUNT-1 instead of MARGINAL

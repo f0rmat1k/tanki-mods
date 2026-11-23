@@ -112,7 +112,7 @@ try:
 except Exception:
     pass
 
-__version__ = '0.16.2'
+__version__ = '0.16.3'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -178,7 +178,7 @@ IDLE_WORK = 0.0005            # a frame in which the mod took less than this cou
 
 # fast passes: the grid is sized to what the time between two updates pays for
 # xray: low-resolution silhouettes of enemies behind walls
-XRAY_GW, XRAY_GH = 24, 18    # fixed grid for xray silhouettes
+XRAY_GW, XRAY_GH = 16, 12    # fixed grid for xray silhouettes
 XRAY_COLOR = (255, 100, 30, 100)  # RGBA: semi-transparent orange
 XRAY_RATE = 2.0               # updates per second for xray silhouettes
 XRAY_MAX = 5                  # most enemies to draw xray silhouettes for
@@ -451,10 +451,11 @@ def speed_rate(spd_val):
 
 def quality_params(quality):
     """(resolution_val, speed_val) for a quality slider value 1-10.
-    Resolution reaches max at quality 8 so the top of the slider is as sharp as
-    the old maximum-resolution setting.  Speed grows linearly the whole way."""
+    Resolution scales from coarsest (quality 1) to about the old practical maximum
+    (quality 7-8 ~ old 'max' preset), leaving headroom for quality 9-10.
+    Speed grows linearly the whole way."""
     t = (min(max(float(quality), 1.0), 10.0) - 1.0) / 9.0
-    res_val = min(t * 100.0 * 9.0 / 7.0, 100.0)
+    res_val = t * 75.0
     spd_val = t * 100.0
     return res_val, spd_val
 
@@ -1324,7 +1325,7 @@ class Panel(object):
         old, self.file_name = self.file_name, name
         tex = '%s/%s' % (owner.cache_vfs, name)
         try:
-            ResMgr.purge(owner.cache_vfs, True)
+            ResMgr.purge(tex)
         except Exception:
             pass
         if self.comp is None:
@@ -1549,11 +1550,12 @@ class SecondaryOverlay(object):
                 os.remove(os.path.join(owner.cache_dir, self.files.pop(0)))
             except OSError:
                 pass
+        tex = '%s/%s' % (owner.cache_vfs, name)
         try:
-            ResMgr.purge(owner.cache_vfs, True)
+            ResMgr.purge(tex)
         except Exception:
             pass
-        return '%s/%s' % (owner.cache_vfs, name)
+        return tex
 
     def _component(self, tex):
         c = self.comp
@@ -1855,11 +1857,12 @@ class XrayOverlay(object):
                 os.remove(os.path.join(owner.cache_dir, self.files.pop(0)))
             except OSError:
                 pass
+        tex = '%s/%s' % (owner.cache_vfs, name)
         try:
-            ResMgr.purge(owner.cache_vfs, True)
+            ResMgr.purge(tex)
         except Exception:
             pass
-        return '%s/%s' % (owner.cache_vfs, name)
+        return tex
 
     def _component(self, tex):
         c = self.comp
@@ -2116,11 +2119,12 @@ class Heatmap(object):
                 os.remove(os.path.join(self.cache_dir, self.files.pop(0)))
             except OSError:
                 pass
+        tex = '%s/%s' % (self.cache_vfs, name)
         try:
-            ResMgr.purge(self.cache_vfs, True)
+            ResMgr.purge(tex)
         except Exception:
             pass
-        return '%s/%s' % (self.cache_vfs, name)
+        return tex
 
     # ---- picture ----
 
@@ -2233,8 +2237,9 @@ class Heatmap(object):
             name = 'hm_mark_%d.png' % os.getpid()
             with open(os.path.join(self.cache_dir, name), 'wb') as f:
                 f.write(mark_png())
+            tex = '%s/%s' % (self.cache_vfs, name)
             try:
-                ResMgr.purge(self.cache_vfs, True)
+                ResMgr.purge(tex)
             except Exception:
                 pass
             S = GUI.Simple
