@@ -89,7 +89,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -160,14 +160,16 @@ XRAY_COLOR = (255, 100, 30, 100)  # RGBA: semi-transparent orange
 XRAY_RATE = 2.0               # updates per second for xray silhouettes
 XRAY_MAX = 5                  # most enemies to draw xray silhouettes for
 XRAY_MODES = ('off', 'always', 'key')   # panel cycle order
+XRAY_FOCUS_CELLS = 6000       # cells of the silhouette under the crosshair (others: XRAY_GW*GH)
+XRAY_SLICE_SHARE = 0.5        # share of the time slice the silhouettes get a frame
 
-# focus boost: when few enemies are visible and the target is near screen centre,
-# the grid cap is raised so cells stay close to min_cell pixels even on a large
-# zoomed-in target.  The cap scales with the target's screen size (not a fixed number),
-# so ultrawide / multi-monitor setups benefit the same way.
-FOCUS_MAX_BOOST = 4.0         # maximum resolution multiplier (1 target, dead centre)
-FOCUS_FEW = 2                 # at most this many visible enemies for the full boost
-FOCUS_CENTRE = 0.5            # clip-space radius from screen centre for full boost (screen is 2 wide)
+# focus: the target under the crosshair may refine past the grid of the quality, toward
+# cells of min_cell pixels, so a big zoomed-in target is sharp. The cap scales with the
+# target's screen size, so ultrawide / multi-monitor setups get the same.
+FOCUS_MAX_BOOST = 4.0         # strength at the crosshair (1 = no focus)
+FOCUS_CENTRE = 0.5            # clip units from the crosshair to the box where it fades out
+FOCUS_STICKY = 0.05           # clip units another vehicle must be nearer the crosshair by
+                              # to take the full map over when nothing is aimed at
 FOCUS_MAX_GRID = 1024         # absolute hard cap on boosted grid_w (keeps fine-pass time sane)
 
 DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the game
@@ -1702,7 +1704,7 @@ class SecondaryOverlay(object):
 
     # ---- pass ----
 
-    def start_pass(self, player, target, view, corners, box, scene, fine, n_visible=10):
+    def start_pass(self, player, target, view, corners, box, scene, fine):
         """Begin a pass over the grid with SECONDARY_SCALE of the primary resolution."""
         owner = self.owner
         shot = player.getVehicleDescriptor().shot
@@ -1745,13 +1747,6 @@ class SecondaryOverlay(object):
         grid_w = max(4, int(owner.res[1] * SECONDARY_SCALE))
         grid_h = max(4, int(owner.res[2] * SECONDARY_SCALE))
         min_cell = owner.res[3]
-        boost = Heatmap._focus_boost(box, n_visible)
-        if boost > 1.0:
-            ideal_w = min(int(w_px / min_cell) + 1, FOCUS_MAX_GRID)
-            ideal_h = min(int(h_px / min_cell) + 1, int(FOCUS_MAX_GRID * GRID_ASPECT))
-            t = (boost - 1.0) / (FOCUS_MAX_BOOST - 1.0)
-            grid_w = max(grid_w, int(grid_w + (ideal_w - grid_w) * t))
-            grid_h = max(grid_h, int(grid_h + (ideal_h - grid_h) * t))
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
         cell = finest
         if not fine:
@@ -1910,11 +1905,11 @@ class SecondaryOverlay(object):
 # ---- xray: silhouettes of enemies behind walls ----
 
 class XrayOverlay(object):
-    """A low-resolution solid-colour silhouette of an enemy behind a wall.
+    """A solid-colour silhouette of an enemy behind a wall.
 
     No penetration analysis -- just show the outline so the player knows which way
-    the enemy faces.  The grid is XRAY_GW x XRAY_GH at most, and the raycast goes
-    against the target's collision model.
+    the enemy faces. About XRAY_GW x XRAY_GH cells, XRAY_FOCUS_CELLS for the one nearest
+    the crosshair; the rays go against the target's collision model, a slice per frame.
     """
 
     def __init__(self, owner):
@@ -1925,6 +1920,9 @@ class XrayOverlay(object):
         self.counter = 0
         self.files = []
         self.next_pass = 0.0
+        self.job = None           # generator of the silhouette being cast
+        self.deadline = 0.0
+        self.cur_box = None       # the target's box this frame
 
     # ---- files and picture ----
 
@@ -1967,37 +1965,46 @@ class XrayOverlay(object):
         GUI.addRoot(c)
         return c
 
-    def publish(self, target, gw, gh, box, corners, view):
-        """Raycast the target and draw a solid-colour silhouette."""
+    def start(self, target, budget, box, corners, view, min_cell):
+        """Begin casting a silhouette of about `budget` cells (none smaller than min_cell
+        pixels); the job runs a slice per frame and then draws it."""
         sw, sh = GUI.screenResolution()[:2]
         x0, y0 = max(box[0], -1.0), max(box[1], -1.0)
         x1, y1 = min(box[2], 1.0), min(box[3], 1.0)
         w_px, h_px = (x1 - x0) * 0.5 * sw, (y1 - y0) * 0.5 * sh
         if w_px < 2.0 or h_px < 2.0:
+            self.job = None
             self._hide()
             return
-        cell = max(w_px / gw, h_px / gh)
-        gw = max(1, min(gw, int(math.ceil(w_px / cell - 1e-6))))
-        gh = max(1, min(gh, int(math.ceil(h_px / cell - 1e-6))))
+        cell = max(min_cell, math.sqrt(w_px * h_px / float(budget)))
+        gw = max(1, int(math.ceil(w_px / cell - 1e-6)))
+        gh = max(1, int(math.ceil(h_px / cell - 1e-6)))
         cw, ch = cell * 2.0 / sw, cell * 2.0 / sh
         left = (x0 + x1) * 0.5 - gw * cw * 0.5
         top = (y0 + y1) * 0.5 + gh * ch * 0.5
+        self.job = self._cast(target, view, (gw, gh, left, top, cw, ch), box, corners)
 
-        foot = Footprint(view, corners, (gw, gh, left, top, cw, ch))
+    def _cast(self, target, view, grid, box, corners):
+        gw, gh, left, top, cw, ch = grid
+        foot = Footprint(view, corners, grid)
         center_x, center_y, center_z = foot.center
         radius = foot.radius
         cx, cy, cz = view.pos
         cam_dist = math.sqrt((center_x - cx) ** 2 + (center_y - cy) ** 2
-                              + (center_z - cz) ** 2)
+                             + (center_z - cz) ** 2)
         t0 = max(view.near, cam_dist - radius - 0.5)
         t1 = cam_dist + radius + 0.5
-
         rx, ry, rz = view.right
         ux, uy, uz = view.up
         fx, fy, fz = view.fwd
         tan_x, tan_y = view.tan_x, view.tan_y
-        V3, sqrt = Math.Vector3, math.sqrt
-
+        V3, sqrt, clock = Math.Vector3, math.sqrt, time.clock
+        # the rays move with the target if it drives on during the cast
+        base = Math.Matrix(target.matrix)
+        base_pose = _pose(base)
+        base_inv = Math.Matrix(base)
+        base_inv.invert()
+        drift = None
         try:
             collide = target.appearance.collisions.collideAllWorld
         except (AttributeError, TypeError):
@@ -2007,6 +2014,7 @@ class XrayOverlay(object):
         color = bytes(bytearray(XRAY_COLOR))
         empty = bytes(bytearray((0, 0, 0, 0)))
         rows = []
+        n = 0
         for j in xrange(gh):
             ny = (top - (j + 0.5) * ch) * tan_y
             ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
@@ -2022,7 +2030,25 @@ class XrayOverlay(object):
                 dx *= k; dy *= k; dz *= k
                 a = V3(cx + dx * t0, cy + dy * t0, cz + dz * t0)
                 b = V3(cx + dx * t1, cy + dy * t1, cz + dz * t1)
+                if drift is not None:
+                    a, b = drift.applyPoint(a), drift.applyPoint(b)
                 row.append(color if collide(a, b) else empty)
+                n += 1
+                if not n & 7 and clock() > self.deadline:
+                    yield
+                    try:
+                        app = target.appearance
+                        if app is None or app.collisions is None:
+                            return
+                        collide = app.collisions.collideAllWorld
+                    except Exception:
+                        return
+                    now = Math.Matrix(target.matrix)
+                    if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
+                        drift = Math.Matrix(base_inv)
+                        drift.postMultiply(now)
+                    else:
+                        drift = None
             rows.append(b''.join(row))
 
         if not any(any(bytearray(r)) for r in rows):
@@ -2036,7 +2062,7 @@ class XrayOverlay(object):
             self.pic_sig = sig
         rect = (left, top, gw * cw, gh * ch)
         self.pic = (target.id, rect, box)
-        self._place(box)
+        self._place(self.cur_box or box)
 
     def _place(self, box):
         c = self.comp
@@ -2073,6 +2099,7 @@ class XrayOverlay(object):
                 pass
         self.files = []
         self.pic = self.pic_sig = None
+        self.job = None
 
 
 def _is_behind_wall(entity, view):
@@ -2412,10 +2439,7 @@ class Heatmap(object):
                     continue
             except Exception:
                 continue
-            wall = walls.get(eid)
-            if wall is None or not 0.0 <= now - wall[0] < WALL_PERIOD:
-                wall = walls[eid] = (now, _is_behind_wall(entity, view))
-            if not wall[1]:
+            if not self._behind_wall(eid, entity, view, now):
                 continue
             result[eid] = item
             if len(result) >= XRAY_MAX:
@@ -2440,26 +2464,42 @@ class Heatmap(object):
         # update positions of existing silhouettes
         for tid, (entity, corners, box, view) in hidden.items():
             ov = self.xrays[tid]
+            ov.cur_box = box
             if ov.pic is not None and ov.pic[0] == tid:
                 ov._place(box)
             else:
                 ov._hide()
-        # one raycast pass per frame (round-robin)
-        tids = sorted(self.xrays.keys())
-        n = len(tids)
-        for _ in xrange(n):
-            idx = self._xray_robin % n
-            self._xray_robin = (self._xray_robin + 1) % n
-            tid = tids[idx]
-            if tid not in hidden:
-                continue
-            ov = self.xrays[tid]
-            if now >= ov.next_pass:
-                entity, corners, box, view = hidden[tid]
-                ov.publish(entity, XRAY_GW, XRAY_GH, box, corners, view)
-                ov.next_pass = now + 1.0 / XRAY_RATE
-            break
+        # the silhouette nearest the crosshair is cast finely and worked on every frame; the
+        # others coarsely, one a frame in turn
+        focus, best = None, None
+        for tid, item in hidden.items():
+            off = self._off_crosshair(item[2])
+            if best is None or off < best:
+                focus, best = tid, off
+        share = self._slice() * XRAY_SLICE_SHARE
+        if focus is not None:
+            self._xray_step(self.xrays[focus], hidden[focus], now, XRAY_FOCUS_CELLS, share)
+        others = sorted(t for t in self.xrays if t != focus and t in hidden)
+        if others:
+            tid = others[self._xray_robin % len(others)]
+            self._xray_robin += 1
+            self._xray_step(self.xrays[tid], hidden[tid], now, XRAY_GW * XRAY_GH, share)
         return True
+
+    def _xray_step(self, ov, item, now, budget, share):
+        """Start a silhouette when it is due, and work on it for `share` seconds."""
+        entity, corners, box, view = item
+        if ov.job is None and now >= ov.next_pass:
+            ov.next_pass = now + 1.0 / XRAY_RATE
+            ov.start(entity, budget, box, corners, view, self.res[3])
+        if ov.job is not None:
+            ov.deadline = time.clock() + share
+            try:
+                next(ov.job)
+            except StopIteration:
+                ov.job = None
+            except Exception:
+                ov.job = None
 
     # ---- target ----
 
@@ -2489,20 +2529,63 @@ class Heatmap(object):
             return False
 
     def _pick_target(self, player, now):
+        """The vehicle the full map is for: the one aimed at; for `hold` seconds after the aim
+        left it (and while the settings panel is open) still that one; else the vehicle on the
+        screen nearest the crosshair that is not behind a wall."""
         aimed = BigWorld.target()
         if self._is_target(aimed, player):
-            if aimed is not self.target:
-                self._drop()
-                self.target = aimed
-                self.next_pass = 0.0
+            chosen = aimed
             self.seen = now
-        elif self.target is not None:
-            # with the settings panel open the cursor is free and nothing is aimed at: the map
-            # stays on the last target, so a change made in the panel is seen
-            expired = not self.panel.visible and now - self.seen > float(self.cfg['hold'])
-            if expired or not self._is_target(self.target, player):
+        else:
+            chosen = None
+            if self.target is not None and self._is_target(self.target, player):
+                # with the settings panel open the cursor is free and nothing is aimed at: the
+                # map stays on the last target, so a change made in the panel is seen
+                if self.panel.visible or now - self.seen <= float(self.cfg['hold']):
+                    chosen = self.target
+            if chosen is None:
+                chosen = self._nearest_seen(player, now)
+        if chosen is not self.target:
+            if self.target is not None:
                 self._drop()
+            self.target = chosen
+            self.next_pass = 0.0
         return self.target
+
+    @staticmethod
+    def _off_crosshair(box):
+        """(clip units from the crosshair to the box, from the crosshair to its middle)."""
+        dx = max(box[0], -box[2], 0.0)
+        dy = max(box[1], -box[3], 0.0)
+        mx, my = (box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5
+        return math.sqrt(dx * dx + dy * dy), math.sqrt(mx * mx + my * my)
+
+    def _behind_wall(self, eid, entity, view, now):
+        """Whether the static scene hides the vehicle's middle, looked at again after
+        WALL_PERIOD."""
+        wall = self._walls.get(eid)
+        if wall is None or not 0.0 <= now - wall[0] < WALL_PERIOD:
+            wall = self._walls[eid] = (now, _is_behind_wall(entity, view))
+        return wall[1]
+
+    def _nearest_seen(self, player, now):
+        """The vehicle on the screen nearest the crosshair, not behind a wall; the one chosen
+        before is kept unless another is clearly nearer."""
+        scan = self._on_screen(player)
+        best, best_off = None, None
+        for eid, (entity, corners, box, view) in scan.items():
+            if self._behind_wall(eid, entity, view, now):
+                continue
+            off = self._off_crosshair(box)
+            if best_off is None or off < best_off:
+                best, best_off = entity, off
+        cur = self.target
+        if best is not None and cur is not None and cur is not best and cur.id in scan:
+            cur_off = self._off_crosshair(scan[cur.id][2])
+            if (cur_off[0] <= best_off[0] + FOCUS_STICKY and
+                    not self._behind_wall(cur.id, cur, scan[cur.id][3], now)):
+                return cur
+        return best
 
     # ---- the pass ----
 
@@ -2572,20 +2655,15 @@ class Heatmap(object):
         return max(MIN_FAST_CELLS, work / self.cost)
 
     @staticmethod
-    def _focus_boost(box, n_visible):
-        """Resolution multiplier when few enemies are on screen and the target is centred.
-        Returns a factor >= 1.0 to multiply grid_w / grid_h by (min_cell is divided)."""
-        if n_visible > FOCUS_FEW or FOCUS_MAX_BOOST <= 1.0:
+    def _focus_boost(box):
+        """How much finer the full grid of the aimed target may get: FOCUS_MAX_BOOST when its
+        box holds the crosshair (the screen centre), less the farther the box is from it."""
+        if FOCUS_MAX_BOOST <= 1.0:
             return 1.0
-        # how centred the target's box is: 0 = dead centre, 1 = at the edge
-        bcx = (box[0] + box[2]) * 0.5    # clip x, screen is -1..+1
-        bcy = (box[1] + box[3]) * 0.5    # clip y
-        off = math.sqrt(bcx * bcx + bcy * bcy)
-        centre_t = min(off / FOCUS_CENTRE, 1.0)   # 0 = centred, 1 = far from centre
-        # fewer targets → more boost; 1 target → full, FOCUS_FEW → half
-        count_t = (float(n_visible) - 1.0) / max(float(FOCUS_FEW), 1.0)   # 0..1
-        strength = (1.0 - centre_t) * (1.0 - count_t)
-        return 1.0 + (FOCUS_MAX_BOOST - 1.0) * strength
+        dx = max(box[0], -box[2], 0.0)    # clip units from the centre to the box
+        dy = max(box[1], -box[3], 0.0)
+        off = min(math.sqrt(dx * dx + dy * dy) / FOCUS_CENTRE, 1.0)
+        return 1.0 + (FOCUS_MAX_BOOST - 1.0) * (1.0 - off)
 
     def _start_pass(self, player, target, view, corners, box, scene, level):
         """Begin a pass over the grid. Level 0 is a fast one with as many cells as there is
@@ -2624,12 +2702,10 @@ class Heatmap(object):
         if w_px < 2.0 or h_px < 2.0:
             return
         grid_w, grid_h, min_cell = self.res[1:4]
-        # focus boost: when few enemies are on screen and the target is centred, raise
-        # the grid cap toward w_px/min_cell (so cells stay close to min_cell pixels).
-        # min_cell stays as the quality slider set it: higher quality = finer cells.
-        # The boost factor (1.0 .. FOCUS_MAX_BOOST) says how far from base toward ideal.
-        n_visible = self._count_on_screen(player, view)
-        boost = self._focus_boost(box, n_visible)
+        # focus: the target under the crosshair may refine past the grid of the quality, up
+        # to cells of min_cell pixels (on a big zoomed-in target the grid is the limit). The
+        # fast passes stay sized to the time there is; the refining ones get there.
+        boost = self._focus_boost(box)
         base_gw, base_gh = grid_w, grid_h
         if boost > 1.0:
             # the ideal grid that makes cells exactly min_cell pixels, hard-capped
@@ -2639,16 +2715,15 @@ class Heatmap(object):
             grid_w = max(grid_w, int(grid_w + (ideal_w - grid_w) * t))
             grid_h = max(grid_h, int(grid_h + (ideal_h - grid_h) * t))
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
-        # a focused target gets boost times the cells at every level
-        budget = self._fast_cells() * boost * REFINE_STEP ** level
+        budget = self._fast_cells() * REFINE_STEP ** level
         cell = max(finest, math.sqrt(w_px * h_px / budget))
         full = cell <= finest * 1.001     # the whole grid of the quality
         gw = min(grid_w, max(1, int(math.ceil(w_px / cell - 1e-6))))
         gh = min(grid_h, max(1, int(math.ceil(h_px / cell - 1e-6))))
         if self.cfg['debug']:
-            log('focus: visible=%d boost=%.2f cap %dx%d -> %dx%d level %d grid %dx%d '
+            log('focus: boost=%.2f cap %dx%d -> %dx%d level %d grid %dx%d '
                 'cell %.1f px target_px=%.0fx%.0f min_cell=%.1f%s'
-                % (n_visible, boost, base_gw, base_gh, grid_w, grid_h, level, gw, gh, cell,
+                % (boost, base_gw, base_gh, grid_w, grid_h, level, gw, gh, cell,
                    w_px, h_px, min_cell, ' full' if full else ''))
         cw, ch = cell * 2.0 / sw, cell * 2.0 / sh
         left = (x0 + x1) * 0.5 - gw * cw * 0.5
@@ -3046,9 +3121,13 @@ class Heatmap(object):
         self._primary_seen = None
         target = self._pick_target(player, now)
         if target is not None:
-            view = View()
-            corners = target_corners(target)
-            box = view.box(corners)
+            scanned = self._scan.get(target.id) if self._scan_no == self.frame_no else None
+            if scanned is not None:
+                corners, box, view = scanned[1], scanned[2], scanned[3]
+            else:
+                view = View()
+                corners = target_corners(target)
+                box = view.box(corners)
             if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
                 # behind the camera or off the screen
                 self.job = None
@@ -3166,10 +3245,6 @@ class Heatmap(object):
         self._scan, self._scan_no = result, self.frame_no
         return result
 
-    def _count_on_screen(self, player, view):
-        """How many target vehicles are on the screen right now, the aimed one too."""
-        return max(len(self._on_screen(player)), 1)
-
     def _visible_enemies(self, player):
         """Entity IDs with (entity, corners, box, view) for the other targets on screen now."""
         primary_id = self.target.id if self.target is not None else None
@@ -3229,8 +3304,7 @@ class Heatmap(object):
                 if fine is not None:
                     ov.next_pass = now + 1.0 / self.res[5]
                     ov.pass_start = now
-                    ov.start_pass(player, entity, view, corners, box, scene, fine,
-                                  1 + len(visible))
+                    ov.start_pass(player, entity, view, corners, box, scene, fine)
             if ov.job is not None:
                 ov.deadline = time.clock() + self._slice() * SECONDARY_SLICE_SHARE
                 try:

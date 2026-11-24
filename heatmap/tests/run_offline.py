@@ -577,17 +577,36 @@ check(len(STATE.callbacks) == 1, 'tick scheduled at battle start')
 enemy = Vehicle(7, 2, (1.0, 0.0, 22.0), math.radians(145.0))
 enemy.turret_yaw = math.radians(40.0)
 ENTITIES[enemy.id] = enemy
+cost0 = g.cost
 frames(30)
-check(not PUBLISHED and not ROOTS, 'nothing without a target')
+check(g.target is enemy and PUBLISHED,
+      'nothing aimed at: the vehicle nearest the crosshair gets the map')
+other = Vehicle(30, 2, (-12.0, 0.0, 22.0), 0.0)
+ENTITIES[other.id] = other
+frames(30)
+check(g.target is enemy, 'of two, the one nearer the crosshair keeps it')
+start_cam = STATE.cam
+STATE.cam = look_at((0.0, 6.0, -12.0), (-12.0, 1.5, 22.0))
+frames(30)
+check(g.target is other, 'the camera turns to the other one: it takes the map')
+STATE.cam = start_cam
+del ENTITIES[other.id]
+g._drop()
+g.cost = cost0
+del PUBLISHED[:]
+for f in os.listdir(CACHE):
+    os.remove(os.path.join(CACHE, f))
+g.files = []
 
 STATE.target = enemy
 frames(600)
 check(kinds() == ['fast', 'fine'], 'a fast pass, then a fine one for a still scene %r' % kinds())
 fast = PUBLISHED[0]
-check(fast[1] * fast[2] < PUBLISHED[1][1] * PUBLISHED[1][2] / 3,
-      'the fast grid is coarse: %dx%d against %dx%d' % (fast[1:3] + PUBLISHED[1][1:3]))
+check(fast[1] * fast[2] < PUBLISHED[-1][1] * PUBLISHED[-1][2] / 3,
+      'the fast grid is coarse: %dx%d against %dx%d' % (fast[1:3] + PUBLISHED[-1][1:3]))
+n_still = len(PUBLISHED)
 frames(300)
-check(len(PUBLISHED) == 2, 'and nothing more while nothing moves')
+check(len(PUBLISHED) == n_still, 'and nothing more while nothing moves')
 codes, gw, gh, rect, box = PUBLISHED[-1]
 counts = [codes.count(chr(c)) for c in range(6)]
 # count gradient codes (16..47) as marginal
@@ -622,7 +641,7 @@ check(rows_hit[0] <= 1 and rows_hit[-1] >= gh - 2 and cols_hit[0] <= 1 and cols_
       'silhouette fills the box (rows %d-%d of %d, columns %d-%d of %d)'
       % (rows_hit[0], rows_hit[-1], gh, cols_hit[0], cols_hit[-1], gw))
 png = [f for f in os.listdir(CACHE) if f.endswith('.png')]
-check(len(png) == 2, 'the fast and the fine PNG in the cache')
+check(len(png) == min(3, len(PUBLISHED)), 'a PNG per picture in the cache, the last three kept')
 shutil.copy(os.path.join(CACHE, g.files[-1]), os.path.join(OUT, 'ap.png'))
 shutil.copy(os.path.join(CACHE, g.files[0]), os.path.join(OUT, 'ap_fast.png'))
 game_codes = codes
@@ -821,18 +840,23 @@ check(game.handleKeyEvent(KeyEvent(30)) is False, 'other keys pass through')
 check(game.handleKeyEvent(KeyEvent(35, ctrl=True, shift=True, repeat=True)) is False
       and g.cfg['enabled'], 'a held hotkey does not flip it back')
 
-# the crosshair leaves: the map holds for a second, then goes
+# the crosshair leaves: the map stays on the vehicle nearest the crosshair
 STATE.target = None
+frames(150)
+check(comp.visible and g.target is enemy,
+      'aim gone: the map stays on the vehicle nearest the crosshair')
+# the camera turns away: nothing on the screen, no map
+looking = STATE.cam
+STATE.cam = look_at((0.0, 6.0, -12.0), (0.0, 1.5, -60.0))
 frames(50)
-check(comp.visible, 'map held after the crosshair left')
-frames(100)
-check(not comp.visible and g.target is None, 'map gone after the hold')
+check(not comp.visible and g.target is None, 'nothing on the screen: no map')
+STATE.cam = looking
 
 # an ally is not a target; a dead enemy drops the map
 ally = Vehicle(8, 1, (0.0, 0.0, 40.0), 0.0)
 STATE.target = ally
 frames(100)
-check(not comp.visible, 'no map for an ally')
+check(g.target is enemy, 'no map for an ally: the enemy nearest the crosshair keeps it')
 STATE.target = enemy
 frames(300)
 check(comp.visible, 'map for the enemy again')
@@ -1282,7 +1306,8 @@ check(game.handleKeyEvent(KeyEvent(256)) is False, 'a click beside the panel pas
 check(game.handleKeyEvent(KeyEvent(1)) is True and not g.panel.visible, 'Esc closes the panel')
 check(game.handleKeyEvent(KeyEvent(1)) is False, 'Esc is the game\'s again')
 frames(150)
-check(g.target is None, 'the hold runs out once the panel is closed')
+check(STATE.time - g.seen > float(g.cfg['hold']) and g.target is enemy,
+      'the hold runs out once the panel is closed; the vehicle nearest the crosshair keeps the map')
 game.handleKeyEvent(PANEL_KEY)
 check(g.panel.visible and click(('close',)) is True and not g.panel.visible, 'close button')
 check(game.handleKeyEvent(KeyEvent(256, down=False)) is True,
@@ -1424,8 +1449,20 @@ frames(600)
 check(enemy4.id in g.xrays, 'xray overlay for enemy behind wall')
 xr_ov = g.xrays[enemy4.id]
 check(xr_ov.comp is not None and xr_ov.comp.visible, 'xray silhouette visible')
-check(xr_ov.pic_sig is not None and xr_ov.pic_sig[0] <= hm.XRAY_GW
-      and xr_ov.pic_sig[1] <= hm.XRAY_GH, 'xray grid is low resolution')
+check(xr_ov.pic_sig is not None
+      and xr_ov.pic_sig[0] * xr_ov.pic_sig[1] > hm.XRAY_GW * hm.XRAY_GH * 4,
+      'the silhouette under the crosshair is fine: %dx%d' % xr_ov.pic_sig[:2])
+# one to the side stays coarse
+enemy5 = Vehicle(15, 2, (-14.0, 0.0, 22.0), 0.0)
+ENTITIES[enemy5.id] = enemy5
+frames(600)
+side = g.xrays.get(enemy5.id)
+check(side is not None and side.pic_sig is not None
+      and side.pic_sig[0] * side.pic_sig[1] <= hm.XRAY_GW * hm.XRAY_GH * 1.5,
+      'a silhouette away from the crosshair stays coarse: %r' % (side and side.pic_sig and
+                                                            side.pic_sig[:2],))
+del ENTITIES[enemy5.id]
+frames(10)
 # the rows of the xray silhouette use the xray colour where the collision model was hit
 xr_rows = xr_ov.pic_sig[2]
 xr_color = bytes(bytearray(hm.XRAY_COLOR))
