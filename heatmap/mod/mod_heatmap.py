@@ -89,7 +89,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -188,7 +188,6 @@ LOOSE = 3.0
 REFINE_STEP = 4.0             # each refining pass casts this many times the cells of the last
 PART_GROW = 0.3               # meters the part outlines are widened by (Footprint)
 OCCLUDER_REACH = 10.0         # meters from the camera-target line a vehicle may hide it from
-OCCLUDER_REFRESH = 0.25       # seconds between looks for such vehicles during a pass
 WALL_PERIOD = 0.15            # seconds an enemy's "behind a wall" answer is kept (xray)
 # a still scene gets a new fine pass when its place on the screen changed this much
 REFRESH_SIZE = 0.05           # share of the box's width or height
@@ -1789,7 +1788,6 @@ class SecondaryOverlay(object):
         cover = bool(owner.cfg['hide_covered']) and not owner.cover_failed
         scene_fn, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
         occluders = _occluders(target.id, view.pos, foot.center, foot.radius) if cover else []
-        occ_time = BigWorld.time()
         covered_code = COVERED if owner.palette[COVERED + PEN][3:] != b'\x00' else None
         get_mat = target.getMatinfo
         mats = {}
@@ -1888,9 +1886,10 @@ class SecondaryOverlay(object):
                         collide = app.collisions.collideAllWorld
                     except Exception:
                         return
-                    if cover and BigWorld.time() - occ_time > OCCLUDER_REFRESH:
+                    # fresh every frame: a vehicle that dies swaps its collision model, and a
+                    # call into the old one crashes the game
+                    if cover:
                         occluders = _occluders(target.id, view.pos, foot.center, foot.radius)
-                        occ_time = BigWorld.time()
                     now = Math.Matrix(target.matrix)
                     if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
                         drift = Math.Matrix(base_inv)
@@ -2824,7 +2823,6 @@ class Heatmap(object):
         cover = bool(self.cfg['hide_covered']) and not self.cover_failed
         scene, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
         occluders = _occluders(target.id, view.pos, foot.center, foot.radius) if cover else []
-        occ_time = BigWorld.time()
         covered_code = COVERED if self.palette[COVERED + PEN][3:] != b'\x00' else None
         covered_cells = outside_cells = 0
         get_mat = target.getMatinfo
@@ -2922,9 +2920,10 @@ class Heatmap(object):
                         collide = app.collisions.collideAllWorld
                     except Exception:
                         return
-                    if cover and BigWorld.time() - occ_time > OCCLUDER_REFRESH:
+                    # fresh every frame: a vehicle that dies swaps its collision model, and a
+                    # call into the old one crashes the game
+                    if cover:
                         occluders = _occluders(target.id, view.pos, foot.center, foot.radius)
-                        occ_time = BigWorld.time()
                     slice_start = clock()
                     frames += 1
                     now = Math.Matrix(target.matrix)
@@ -3033,9 +3032,10 @@ class Heatmap(object):
                     collide = app.collisions.collideAllWorld
                 except Exception:
                     return
-                if cover and BigWorld.time() - occ_time > OCCLUDER_REFRESH:
+                # fresh every frame: a vehicle that dies swaps its collision model, and a
+                # call into the old one crashes the game
+                if cover:
                     occluders = _occluders(target.id, view.pos, foot.center, foot.radius)
-                    occ_time = BigWorld.time()
                 slice_start = clock()
                 frames += 1
                 now = Math.Matrix(target.matrix)

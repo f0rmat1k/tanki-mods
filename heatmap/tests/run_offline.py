@@ -1193,6 +1193,33 @@ ally_kept = [i for i in range(len(ally_codes)) if ally_codes[i] != '\x00']
 print('     ally: %d cells hidden, %d left' % (len(ally_gone), len(ally_kept)))
 check(len(ally_gone) > 10 and len(ally_kept) > 10,
       'a live ally hides part of the target')
+# a vehicle that dies during a pass gets a new collision model: the old one is never called
+# again (in the game that is a crash)
+freed = {'on': False, 'calls': 0}
+old_coll = ally_blocker.appearance.collisions
+real_old = old_coll.collideAllWorld
+
+
+def old_call(a, b):
+    if freed['on']:
+        freed['calls'] += 1
+    return real_old(a, b)
+
+
+old_coll.collideAllWorld = old_call
+g.res = g.res[:4] + (0.5,) + g.res[5:]      # 0.5 ms slices: a pass over many frames
+g.job = None
+g.last_key = None
+g.next_pass = 0.0
+frames(3)
+check(g.job is not None, 'a pass under way when the ally dies')
+freed['on'] = True
+ally_blocker.appearance = Obj(collisions=Collisions(ally_blocker),
+                              compoundModel=ally_blocker.appearance.compoundModel)
+frames(300)
+g.res = g.res[:4] + (None,) + g.res[5:]
+check(freed['calls'] == 0, 'the old collision model of a vehicle is not called after it changed '
+      '(%d calls)' % freed['calls'])
 # an ally far off the line from the camera to the target is not asked at all
 ally_aside = Vehicle(52, 1, (60.0, 0.0, 15.0), 0.0)
 ENTITIES[ally_aside.id] = ally_aside
