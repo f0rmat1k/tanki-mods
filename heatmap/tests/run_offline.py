@@ -683,7 +683,7 @@ check(kinds()[-1] == 'fine', 'the fine map comes once the target stops')
 
 # a fine pass is dropped the moment the target moves
 g.last_key = None
-frames(60)   # the fast pass completes; a fine pass starts and completes
+frames(200)  # the fast pass completes; a fine pass starts and completes (more frames for focus-boosted grid)
 check(g.last_key is not None and g.last_key[1], 'a fine pass completed')
 # now invalidate and use a tiny slice so the NEXT fine pass stays in progress
 g.last_key = (g.last_key[0], False)  # mark last pass as not-full to trigger fine pass

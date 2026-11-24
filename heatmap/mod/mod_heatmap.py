@@ -112,7 +112,7 @@ try:
 except Exception:
     pass
 
-__version__ = '0.16.5'
+__version__ = '0.16.6'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -185,10 +185,13 @@ XRAY_MAX = 5                  # most enemies to draw xray silhouettes for
 XRAY_MODES = ('off', 'always', 'key')   # panel cycle order
 
 # focus boost: when few enemies are visible and the target is near screen centre,
-# the grid may use up to FOCUS_MAX_BOOST times more cells (the min_cell shrinks to match)
-FOCUS_MAX_BOOST = 2.0         # maximum resolution multiplier (1 target, dead centre)
+# the grid cap is raised so cells stay close to min_cell pixels even on a large
+# zoomed-in target.  The cap scales with the target's screen size (not a fixed number),
+# so ultrawide / multi-monitor setups benefit the same way.
+FOCUS_MAX_BOOST = 4.0         # maximum resolution multiplier (1 target, dead centre)
 FOCUS_FEW = 2                 # at most this many visible enemies for the full boost
-FOCUS_CENTRE = 0.3            # clip-space radius from screen centre for full boost (screen is 2 wide)
+FOCUS_CENTRE = 0.5            # clip-space radius from screen centre for full boost (screen is 2 wide)
+FOCUS_MAX_GRID = 1024         # absolute hard cap on boosted grid_w (keeps fine-pass time sane)
 
 DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the game
 FAST_FILL = 0.85              # share of that time a fast pass is planned to take
@@ -1679,9 +1682,11 @@ class SecondaryOverlay(object):
         min_cell = owner.res[3]
         boost = Heatmap._focus_boost(box, n_visible)
         if boost > 1.0:
-            grid_w = min(int(grid_w * boost), 512)
-            grid_h = min(int(grid_h * boost), int(512 * GRID_ASPECT))
-            min_cell = max(min_cell / boost, 1.0)
+            ideal_w = min(int(w_px / min_cell) + 1, FOCUS_MAX_GRID)
+            ideal_h = min(int(h_px / min_cell) + 1, int(FOCUS_MAX_GRID * GRID_ASPECT))
+            t = (boost - 1.0) / (FOCUS_MAX_BOOST - 1.0)
+            grid_w = max(grid_w, int(grid_w + (ideal_w - grid_w) * t))
+            grid_h = max(grid_h, int(grid_h + (ideal_h - grid_h) * t))
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
         cell = finest
         if not fine:
@@ -2545,13 +2550,18 @@ class Heatmap(object):
         if w_px < 2.0 or h_px < 2.0:
             return
         grid_w, grid_h, min_cell = self.res[1:4]
-        # focus boost: when few enemies are on screen and the target is centred, use
-        # a finer grid so a zoomed-in single target is not pixelated
+        # focus boost: when few enemies are on screen and the target is centred, raise
+        # the grid cap toward w_px/min_cell (so cells stay close to min_cell pixels).
+        # min_cell stays as the quality slider set it: higher quality = finer cells.
+        # The boost factor (1.0 .. FOCUS_MAX_BOOST) says how far from base toward ideal.
         boost = self._focus_boost(box, self._count_on_screen(player, view))
         if boost > 1.0:
-            grid_w = min(int(grid_w * boost), 512)
-            grid_h = min(int(grid_h * boost), int(512 * GRID_ASPECT))
-            min_cell = max(min_cell / boost, 1.0)
+            # the ideal grid that makes cells exactly min_cell pixels, hard-capped
+            ideal_w = min(int(w_px / min_cell) + 1, FOCUS_MAX_GRID)
+            ideal_h = min(int(h_px / min_cell) + 1, int(FOCUS_MAX_GRID * GRID_ASPECT))
+            t = (boost - 1.0) / (FOCUS_MAX_BOOST - 1.0)   # 0..1
+            grid_w = max(grid_w, int(grid_w + (ideal_w - grid_w) * t))
+            grid_h = max(grid_h, int(grid_h + (ideal_h - grid_h) * t))
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
         cell = finest
         if not fine:
