@@ -15,13 +15,18 @@ import types
 _real_clock = time.clock
 _clock_val = [_real_clock()]
 _clock_step = [0.0]   # added to _clock_val on each call; 0 = real clock
+# seconds a ray of the mock collision model adds to the clock, so the mod measures a cell as
+# costing about what a slow computer gives, however fast the mock runs (RAY_COST[0] can be
+# set lower for a game-like cost)
+RAY_COST = [60e-6]
+_clock_extra = [0.0]
 
 
 def _mock_clock():
     if _clock_step[0]:
         _clock_val[0] += _clock_step[0]
         return _clock_val[0]
-    return _real_clock()
+    return _real_clock() + _clock_extra[0]
 
 
 time.clock = _mock_clock
@@ -121,13 +126,18 @@ class Matrix(object):
         return Vector3(*self.m[i])
 
     def applyVector(self, p):
-        m = self.m
-        return Vector3(*[p[0] * m[0][k] + p[1] * m[1][k] + p[2] * m[2][k] for k in range(3)])
+        x, y, z = (p.x, p.y, p.z) if p.__class__ is Vector3 else (p[0], p[1], p[2])
+        a, b, c = self.m[:3]
+        return Vector3(x * a[0] + y * b[0] + z * c[0], x * a[1] + y * b[1] + z * c[1],
+                       x * a[2] + y * b[2] + z * c[2])
 
     def applyPoint(self, p):
-        m = self.m
-        return Vector3(*[p[0] * m[0][k] + p[1] * m[1][k] + p[2] * m[2][k] + m[3][k]
-                         for k in range(3)])
+        # written out: the mock collision model calls this millions of times
+        x, y, z = (p.x, p.y, p.z) if p.__class__ is Vector3 else (p[0], p[1], p[2])
+        a, b, c, t = self.m
+        return Vector3(x * a[0] + y * b[0] + z * c[0] + t[0],
+                       x * a[1] + y * b[1] + z * c[1] + t[1],
+                       x * a[2] + y * b[2] + z * c[2] + t[2])
 
     def postMultiply(self, o):
         a, b = self.m, o.m
@@ -202,13 +212,14 @@ class Collisions(object):
 
     def collideAllWorld(self, a, b):
         self.calls += 1
+        _clock_extra[0] += RAY_COST[0]
         out = []
         length = (b - a).length
         for idx, (lo, hi, armor, _, _) in self.BOXES.items():
-            inv = Matrix(self.vehicle.part_matrix(idx))
-            inv.invert()
+            inv = self.vehicle.part_inverse(idx)
             p, q = inv.applyPoint(a), inv.applyPoint(b)
-            d = [q[i] - p[i] for i in range(3)]
+            p, q = (p.x, p.y, p.z), (q.x, q.y, q.z)     # tuples: indexed fast below
+            d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]]
             t_in, t_out, f_in, f_out = 0.0, 1.0, None, None
             ok = True
             for i in range(3):
@@ -254,7 +265,31 @@ class Vehicle(object):
         _shot = Obj(piercingPower=(175.0, 160.0), maxDistance=720.0, shell=_shell)
         self.typeDescriptor = Obj(type=Obj(name='test:Box'), shot=_shot)
 
+    def _cached(self):
+        """{('m' or 'inv', part): matrix} for the pose the vehicle has now: the part matrices
+        are pure Python here, and the rays ask for them over and over."""
+        m = self.matrix.m
+        key = (tuple(m[0] + m[1] + m[2] + m[3]), self.turret_yaw)
+        if key != getattr(self, '_pose_key', None):
+            self._pose_key, self._pose_cache = key, {}
+        return self._pose_cache
+
     def part_matrix(self, idx):
+        cache = self._cached()
+        m = cache.get(('m', idx))
+        if m is None:
+            m = cache[('m', idx)] = self._part_matrix(idx)
+        return Matrix(m)
+
+    def part_inverse(self, idx):
+        cache = self._cached()
+        inv = cache.get(('inv', idx))
+        if inv is None:
+            inv = cache[('inv', idx)] = self.part_matrix(idx)
+            inv.invert()
+        return inv
+
+    def _part_matrix(self, idx):
         if idx == 0:
             return self.matrix
         hull = translate(0.0, 0.5, 0.0, self.matrix)
