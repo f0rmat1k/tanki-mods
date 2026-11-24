@@ -60,6 +60,12 @@ close calls count half, and cells left out as covered do not count, like the mis
 vehicle. The mark is a picture of its own over the map, so it is as sharp on a coarse fast map
 as on a fine one; it stays put while its place is nearly as good as the best one, and is found
 again without a new pass when the aim circle grows or shrinks.
+Threat marks (`threat_marks`, on by default, a toggle in the panel): an "!" over every enemy on
+the screen that can penetrate the player right now, green with its standard shells, yellow only
+with premium ones. The rays go the other way, from the enemy's gun at the player's own vehicle,
+so its real angle and what of it terrain and other vehicles hide are taken into account; the
+lower front plate does not count, and the penetrable armor has to make `threat_area` square
+meters (ThreatMarks).
 Known limit: the shot is a straight line from the gun (no ballistic drop).
 """
 import json
@@ -89,7 +95,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '1.0.2'
+__version__ = '1.1.0'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -127,6 +133,11 @@ DEFAULTS = {
     },
     'xray': 'off',            # enemy silhouettes behind walls: 'off', 'always', 'key'
     'xray_key': 'MOUSE3',     # key name (Keys.KEY_*) when xray='key'; MOUSE3 = Mouse4
+    'threat_marks': True,     # "!" over enemies that can penetrate the player now: green with
+                              # standard shells, yellow only with premium ones (ThreatMarks)
+    'threat_area': 0.5,       # square meters of open, penetrable armor it takes (the lower
+                              # front plate left out)
+    'threat_margin': 0.05,    # the armor must be below the penetration by this share
     'debug': False,
 }
 
@@ -703,6 +714,19 @@ class View(object):
                 y1 = y
         return x0, y0, x1, y1
 
+    def point(self, p):
+        """(x, y) of a world point in clip coordinates, None if it is behind the camera."""
+        cx, cy, cz = self.pos
+        vx, vy, vz = p[0] - cx, p[1] - cy, p[2] - cz
+        fx, fy, fz = self.fwd
+        depth = vx * fx + vy * fy + vz * fz
+        if depth <= self.near + 0.05:
+            return None
+        rx, ry, rz = self.right
+        ux, uy, uz = self.up
+        return ((vx * rx + vy * ry + vz * rz) / depth / self.tan_x,
+                (vx * ux + vy * uy + vz * uz) / depth / self.tan_y)
+
 
 def _box_corners(matrix, lo, hi, out):
     V3 = Math.Vector3
@@ -852,14 +876,18 @@ class Footprint(object):
         return m
 
 
-def _occluders(target_id, cam, center, radius):
+def _occluders(target_id, cam, center, radius, shooter_id=None):
     """collideAllWorld of the vehicles that may hide the target from the camera: live allies
-    (not the player) and wrecks, only those near the line from the camera to the target."""
+    (not the player) and wrecks, only those near the line from the camera to the target.
+    With shooter_id (an enemy gun in place of the camera, the player the target) every vehicle
+    but those two counts, live enemies too.
+    Never keep what this returns past the frame: a vehicle that dies swaps its collision model,
+    and a call into the old one crashes the game."""
     out = []
     try:
         player = BigWorld.player()
         my_team = player.team
-        my_id = getattr(player, 'playerVehicleID', None)
+        my_id = shooter_id if shooter_id is not None else getattr(player, 'playerVehicleID', None)
         entities = BigWorld.entities.values()
     except Exception:
         return out
@@ -875,7 +903,8 @@ def _occluders(target_id, cam, center, radius):
                 continue
             if entity.__class__.__name__ != 'Vehicle':
                 continue
-            if entity.isAlive() and entity.publicInfo['team'] != my_team:
+            if (shooter_id is None and entity.isAlive()
+                    and entity.publicInfo['team'] != my_team):
                 continue
             fn = entity.appearance.collisions.collideAllWorld
             p = entity.position
@@ -1076,7 +1105,7 @@ LEGEND = (('pen', u'пробитие'), ('marginal', u'на грани'), ('no_p
           ('ricochet', u'рикошет'), ('no_damage', u'без урона'))
 # what "defaults" in the panel puts back
 PANEL_DEFAULTS = ('enabled', 'quality') + TUNING_KEYS + ('alpha', 'hide_covered',
-                  'best_point', 'show_allies', 'show_all_visible', 'xray')
+                  'best_point', 'show_allies', 'show_all_visible', 'xray', 'threat_marks')
 TRANSPARENCY_STEP = 5     # percent
 
 
@@ -1196,7 +1225,7 @@ def render_panel(cfg, res, font, measured=None):
     W, PAD, ROW = PANEL_W, P_PAD, P_ROW
     th = font.height if font is not None else 14
     width = font.width if font is not None else (lambda text: 0)
-    h = P_HEADER + 8 + ROW * 11 + P_HINT_ROW + P_FOOTER
+    h = P_HEADER + 8 + ROW * 10 + P_HINT_ROW + P_FOOTER
     c = Canvas(W, h, P_BG)
     hits = []
 
@@ -1300,6 +1329,8 @@ def render_panel(cfg, res, font, measured=None):
     c.text(font, r[0] + (bw - width(xray_label)) // 2, mid(y, y + ROW), xray_label,
            P_TEXT if xray != 'off' else P_HINT)
     hits.append(((0, y, W, y + ROW), ('cycle_xray',)))
+    y += ROW
+    toggle(y, 'threat_marks', u'«!» над врагами, что пробьют меня')
     y += ROW
 
     y += 8
@@ -2122,6 +2153,503 @@ def _xray_key_code(cfg):
         return None
 
 
+# ---- threat marks: the enemies that can penetrate the player now ----
+
+THREAT_CELL = 0.25        # meters: a cell of the player's vehicle as an enemy gun sees it
+THREAT_MAX_GRID = 64      # most cells across or down; a very near gun gets bigger cells
+THREAT_PERIOD = 0.5       # seconds between two looks at one enemy
+THREAT_STILL = 0.15       # meters the enemy gun or a corner of the player's parts may move
+                          # before a look is cast again (until then the last answer stands) ...
+THREAT_RECAST = 2.0       # ... but not for longer than this, seconds: other vehicles move
+THREAT_SLICE_SHARE = 0.3  # share of the frame's time slice the looks get ...
+THREAT_MAX_SLICE = 0.0015  # ... but no more than this, seconds
+THREAT_HEIGHT = 34        # pixels: the height of the mark on a screen 1080 lines high
+THREAT_GAP = 4            # pixels between the top of the vehicle and the mark
+THREAT_Z = 0.98           # in front of the map and its mark
+THREAT_RGB = {'standard': (70, 235, 70), 'gold': (255, 205, 40)}
+THREAT_LEVELS = ('standard', 'gold')
+LFP_LENGTH = 0.3          # the lower front plate: in the front share of the hull's box ...
+LFP_HEIGHT = 0.5          # ... and in its lower share
+
+
+def threat_png(h, rgb):
+    """The mark: an exclamation mark h pixels high in rgb, outlined dark; (png, w, h)."""
+    w = max(7, int(round(h * 0.42)))
+    c = Canvas(w, h, (0, 0, 0, 0))
+    o = max(1, int(round(h / 16.0)))
+    bar_end = int(round(h * 0.68))
+    dot_top = int(round(h * 0.78))
+    mid = w / 2.0
+
+    def shape(inset, rgba):
+        # a bar narrowing downwards, then the dot
+        for y in xrange(inset, bar_end - inset):
+            half = mid - (mid - w * 0.24) * y / float(bar_end) - inset
+            c.rect(int(round(mid - half)), y, int(round(mid + half)), y + 1, rgba)
+        half = w * 0.27 - inset
+        c.rect(int(round(mid - half)), dot_top + inset, int(round(mid + half)), h - inset, rgba)
+    shape(0, (12, 12, 12, 230))
+    shape(o, tuple(rgb) + (255,))
+    return c.png(), w, h
+
+
+class _Eye(object):
+    """An enemy gun looking at the player, in the shape Footprint takes a camera: its clip
+    units are tangents."""
+    tan_x = tan_y = 1.0
+
+    def __init__(self, pos, right, up, fwd):
+        self.pos, self.right, self.up, self.fwd = pos, right, up, fwd
+
+
+def _gun_point(vehicle):
+    """Where a vehicle's shells start, near enough: its gun's node, else above its middle."""
+    p = vehicle.position
+    try:
+        g = Math.Matrix(vehicle.appearance.compoundModel.node('gun')).translation
+        if abs(g.x - p.x) + abs(g.y - p.y) + abs(g.z - p.z) < MAX_PART_REACH:
+            return g.x, g.y, g.z
+    except Exception:
+        pass
+    return p.x, p.y + 2.0, p.z
+
+
+def _threat_moved(a, b):
+    """True unless look key b is key a seen again: (gun point, corners of the player's parts),
+    each point within THREAT_STILL."""
+    if a is None or len(a[1]) != len(b[1]):
+        return True
+    for p, q in zip((a[0],) + tuple(a[1]), (b[0],) + tuple(b[1])):
+        if abs(p[0] - q[0]) + abs(p[1] - q[1]) + abs(p[2] - q[2]) > THREAT_STILL:
+            return True
+    return False
+
+
+class ThreatMarks(object):
+    """An "!" over every enemy on the screen whose gun can penetrate the player now: green
+    with its standard shells, yellow only with premium ones.
+
+    One enemy at a time, rays go from its gun through a grid of THREAT_CELL squares over the
+    player's vehicle as that gun sees it (Footprint leaves out the cells beside it). A cell
+    counts if its ray meets the armor, the point is not on the lower front plate (the front
+    and lower part of the hull's box, LFP_*: anyone penetrates that, so it is taken as kept
+    hidden), neither the static scene nor another vehicle hides it from the gun, and the shell
+    penetrates there by the game's rules (shot_code) with `threat_margin` to spare, at the
+    distance between them. When the cells that count make `threat_area` square meters with the
+    best standard shell of the enemy's gun the mark is green; if only with its best premium
+    one, yellow. The real angle of the player's vehicle to the gun is in the rays themselves.
+    An enemy is looked at again every THREAT_PERIOD; the rays are cast again if its gun or the
+    player moved, or after THREAT_RECAST (other vehicles drive in and out between). The looks
+    get THREAT_SLICE_SHARE of the frame's time slice, THREAT_MAX_SLICE at most.
+    Engine callables are fetched again after every yield (see _occluders)."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.found = {}       # enemy id -> (level or None, BigWorld.time() of the look, key,
+                              # square meters penetrated per shell, square meters open,
+                              # BigWorld.time() the rays were last cast)
+        self.marks = {}       # enemy id -> [GUI.Simple, level]
+        self.tops = {}        # enemy id -> meters from its position up to its top
+        self.tex = {}         # level -> texture name
+        self.size = None      # (w, h) of the mark in pixels
+        self.job = None       # generator of the look in progress ...
+        self.job_id = None    # ... at this enemy
+        self.deadline = 0.0
+
+    def clear(self):
+        for item in self.marks.values():
+            try:
+                GUI.delRoot(item[0])
+            except Exception:
+                pass
+        self.marks.clear()
+        self.found.clear()
+        self.tops.clear()
+        self.job = self.job_id = None
+
+    def drop_textures(self):
+        """The end of a battle: the folder with the pictures is emptied."""
+        self.clear()
+        self.tex.clear()
+        self.size = None
+
+    def _texture(self, level):
+        tex = self.tex.get(level)
+        if tex is None:
+            owner = self.owner
+            sh = GUI.screenResolution()[1]
+            png, w, h = threat_png(max(14, int(round(THREAT_HEIGHT * sh / 1080.0))),
+                                   THREAT_RGB[level])
+            name = 'hm_threat_%s_%d.png' % (level, os.getpid())
+            with open(os.path.join(owner.cache_dir, name), 'wb') as f:
+                f.write(png)
+            tex = self.tex[level] = '%s/%s' % (owner.cache_vfs, name)
+            try:
+                ResMgr.purge(tex)
+            except Exception:
+                pass
+            self.size = (w, h)
+        return tex
+
+    @staticmethod
+    def _enemies(player):
+        """{id: entity} of the live enemy vehicles in the world."""
+        out = {}
+        try:
+            entities = BigWorld.entities.values()
+        except Exception:
+            return out
+        for entity in entities:
+            try:
+                if entity.__class__.__name__ != 'Vehicle':
+                    continue
+                if not getattr(entity, 'isStarted', True) or not entity.isAlive():
+                    continue
+                if entity.publicInfo['team'] == player.team:
+                    continue
+                if entity.appearance is None:
+                    continue
+                out[entity.id] = entity
+            except Exception:
+                continue
+        return out
+
+    def frame(self, player, now, budget):
+        """Put the marks over the enemies on the screen and look at them for `budget`
+        seconds; True while an enemy is on the screen."""
+        my_id = getattr(player, 'playerVehicleID', None)
+        me = BigWorld.entities.get(my_id) if my_id is not None else None
+        enemies = self._enemies(player) if me is not None else {}
+        for eid in list(self.found):
+            if eid not in enemies:
+                del self.found[eid]
+                self.tops.pop(eid, None)
+        if self.job_id is not None and self.job_id not in enemies:
+            self.job = self.job_id = None
+        shown = {}
+        if enemies:
+            view = View()
+            for eid, entity in enemies.items():
+                try:
+                    p = entity.position
+                    at = view.point((p.x, p.y + self.tops.get(eid, 3.0), p.z))
+                except Exception:
+                    continue
+                if at is not None and -1.0 <= at[0] <= 1.0 and -1.0 <= at[1] <= 1.0:
+                    shown[eid] = at
+        for eid in list(self.marks):
+            f = self.found.get(eid)
+            if eid not in shown or f is None or f[0] is None:
+                if eid in enemies:
+                    self.marks[eid][0].visible = False
+                else:
+                    try:
+                        GUI.delRoot(self.marks[eid][0])
+                    except Exception:
+                        pass
+                    del self.marks[eid]
+        for eid, at in shown.items():
+            f = self.found.get(eid)
+            if f is not None and f[0] is not None:
+                self._place(eid, f[0], at)
+        if shown and budget > 0.0:
+            self._work(player, me, enemies, shown, now, budget)
+        return bool(shown)
+
+    def _place(self, eid, level, at):
+        """The mark of `level` with its bottom middle THREAT_GAP pixels over clip point at."""
+        tex = self._texture(level)
+        item = self.marks.get(eid)
+        if item is None:
+            S = GUI.Simple
+            c = S(tex)
+            c.materialFX = S.eMaterialFX.BLEND
+            c.widthMode = c.heightMode = S.eSizeMode.PIXEL
+            c.horizontalPositionMode = c.verticalPositionMode = S.ePositionMode.CLIP
+            c.horizontalAnchor = S.eHAnchor.LEFT
+            c.verticalAnchor = S.eVAnchor.TOP
+            GUI.addRoot(c)
+            try:
+                GUI.reSort()
+            except Exception:
+                pass
+            item = self.marks[eid] = [c, level]
+        elif item[1] != level:
+            item[0].textureName = tex
+            item[1] = level
+        c = item[0]
+        w, h = self.size
+        sw, sh = GUI.screenResolution()[:2]
+        c.width, c.height = w, h
+        c.position = (at[0] - float(w) / sw,
+                      min(1.0, at[1] + (THREAT_GAP + h) * 2.0 / sh), THREAT_Z)
+        c.visible = True
+
+    def _due(self, shown, now):
+        """The enemy on the screen looked at longest ago, if that is THREAT_PERIOD ago."""
+        best, best_t = None, None
+        for eid in sorted(shown):
+            f = self.found.get(eid)
+            t = f[1] if f is not None else -1e9
+            if now - t >= THREAT_PERIOD and (best_t is None or t < best_t):
+                best, best_t = eid, t
+        return best
+
+    def _work(self, player, me, enemies, shown, now, budget):
+        self.deadline = time.clock() + budget
+        for _ in xrange(len(shown) + 1):
+            if self.job is None:
+                eid = self._due(shown, now)
+                if eid is None:
+                    return
+                self._start(player, me, enemies[eid], now)
+                if self.job is None:
+                    continue    # nothing moved since the last look: its answer stands
+            try:
+                next(self.job)
+            except StopIteration:
+                self.job = self.job_id = None
+                if time.clock() > self.deadline:
+                    return
+                continue
+            except Exception:
+                self._give_up(self.job_id)
+                self.job = self.job_id = None
+                if 'threat' not in self.owner.logged:
+                    self.owner.logged.add('threat')
+                    log('threat look failed', traceback.format_exc())
+                return
+            return      # it yielded: the time is used up
+
+    def _give_up(self, eid):
+        """A look that could not be finished: the answer before it stays for a while."""
+        if eid is not None:
+            f = self.found.get(eid)
+            self.found[eid] = (f[0] if f is not None else None, BigWorld.time(), None, (), 0.0,
+                              BigWorld.time())
+
+    def _start(self, player, me, enemy, now):
+        corners = target_corners(me)
+        gun = _gun_point(enemy)
+        key = (gun, corners)
+        try:
+            self.tops[enemy.id] = max(1.0, max(c[1] for c in target_corners(enemy))
+                                      - enemy.position.y)
+        except Exception:
+            pass
+        f = self.found.get(enemy.id)
+        if f is not None and now - f[5] < THREAT_RECAST and not _threat_moved(f[2], key):
+            self.found[enemy.id] = (f[0], now) + f[2:]
+            return
+        n = float(len(corners))
+        center = (sum(c[0] for c in corners) / n, sum(c[1] for c in corners) / n,
+                  sum(c[2] for c in corners) / n)
+        dist = math.sqrt(sum((center[k] - gun[k]) ** 2 for k in xrange(3)))
+        shells = self._shells(enemy, dist)
+        if not shells or dist < 1.0:
+            self.found[enemy.id] = (None, now, key, (), 0.0, now)
+            return
+        try:
+            name = enemy.typeDescriptor.type.name
+        except Exception:
+            name = str(enemy.id)
+        self.job_id = enemy.id
+        self.job = self._look(player, me.id, enemy.id, name, gun, corners, center, dist,
+                              shells, key)
+
+    def _shells(self, enemy, dist):
+        """[(level, Rules, penetration at dist)] of the best standard shell of the enemy's gun
+        and of its best premium one, as far as it has them."""
+        try:
+            shots = enemy.typeDescriptor.gun.shots
+        except Exception:
+            return []
+        best = {}
+        for shot in shots:
+            try:
+                shell = shot.shell
+                if shell.kind in NO_MAP_KINDS:
+                    continue
+                pp = pen_at(shot, dist)
+                level = 'gold' if getattr(shell, 'isGold', False) else 'standard'
+            except Exception:
+                continue
+            if pp > 0.0 and (level not in best or pp > best[level][1]):
+                best[level] = (shot, pp)
+        return [(level, Rules(best[level][0].shell, self.owner.use_game_rules), best[level][1])
+                for level in THREAT_LEVELS if level in best]
+
+    def _setting(self, key, lowest, highest):
+        try:
+            return min(max(float(self.owner.cfg[key]), lowest), highest)
+        except (KeyError, TypeError, ValueError):
+            return DEFAULTS[key]
+
+    def _look(self, player, my_id, enemy_id, name, gun, corners, center, dist, shells, key):
+        """Cast the rays from the enemy's gun at the player's vehicle, a slice per frame
+        (yields when self.deadline passes), then store the answer in self.found."""
+        need = self._setting('threat_area', 0.0, 100.0)
+        lo = 100.0 - self._setting('threat_margin', 0.0, 0.9) * 100.0
+        me = BigWorld.entities.get(my_id)
+        try:
+            app = me.appearance
+            collide = app.collisions.collideAllWorld
+        except Exception:
+            self._give_up(enemy_id)
+            return
+        get_mat = me.getMatinfo
+        # the lower front plate: a box in the hull's frame, as the hull stood at the start
+        lfp = None
+        try:
+            hull_inv = Math.Matrix(app.compoundModel.node('hull'))
+            hull_inv.invert()
+            b_lo, b_hi = app.collisions.getBoundingBox(1)[:2]
+            lfp = (hull_inv, b_hi[2] - LFP_LENGTH * (b_hi[2] - b_lo[2]),
+                   b_lo[1] + LFP_HEIGHT * (b_hi[1] - b_lo[1]))
+        except Exception:
+            pass
+        gx, gy, gz = gun
+        fx, fy, fz = [(center[k] - gun[k]) / dist for k in xrange(3)]
+        rx, rz = fz, -fx                       # up x forward
+        rl = math.sqrt(rx * rx + rz * rz)
+        if rl < 1e-3:
+            rx, rz, rl = 1.0, 0.0, 1.0         # the gun right above or below
+        rx, ry, rz = rx / rl, 0.0, rz / rl
+        ux, uy, uz = fy * rz - fz * ry, fz * rx - fx * rz, fx * ry - fy * rx
+        eye = _Eye(gun, (rx, ry, rz), (ux, uy, uz), (fx, fy, fz))
+        # the vehicle's outline as the gun sees it, cut into cells of THREAT_CELL meters
+        x0 = y0 = 1e9
+        x1 = y1 = -1e9
+        for c in corners:
+            vx, vy, vz = c[0] - gx, c[1] - gy, c[2] - gz
+            depth = vx * fx + vy * fy + vz * fz
+            if depth <= 0.3:
+                self.found[enemy_id] = (None, BigWorld.time(), key, (), 0.0,
+                                         BigWorld.time())
+                return      # the gun is at the vehicle itself
+            x = (vx * rx + vy * ry + vz * rz) / depth
+            y = (vx * ux + vy * uy + vz * uz) / depth
+            x0, x1, y0, y1 = min(x0, x), max(x1, x), min(y0, y), max(y1, y)
+        cell = max(THREAT_CELL / dist, (x1 - x0) / THREAT_MAX_GRID, (y1 - y0) / THREAT_MAX_GRID)
+        gw = max(1, int(math.ceil((x1 - x0) / cell)))
+        gh = max(1, int(math.ceil((y1 - y0) / cell)))
+        left = (x0 + x1) * 0.5 - gw * cell * 0.5
+        top = (y0 + y1) * 0.5 + gh * cell * 0.5
+        foot = Footprint(eye, corners, (gw, gh, left, top, cell, cell))
+        radius = foot.radius
+        t0 = max(0.5, dist - radius - 0.5)
+        t1 = dist + radius + 0.5
+        cover = bool(self.owner.cfg['hide_covered']) and not self.owner.cover_failed
+        scene, space = BigWorld.collideSegment, player.spaceID
+        occluders = _occluders(my_id, gun, center, radius, enemy_id) if cover else []
+        V3, sqrt, clock = Math.Vector3, math.sqrt, time.clock
+        mats = {}
+        caches = [{} for _ in shells]
+        areas = [0.0] * len(shells)
+        opened = 0.0
+        lfp_cells = rays = 0
+        # the rays move with the player's vehicle if it drives on during the look
+        base = Math.Matrix(me.matrix)
+        base_pose = _pose(base)
+        base_inv = Math.Matrix(base)
+        base_inv.invert()
+        drift = None
+        for j in xrange(gh):
+            ny = top - (j + 0.5) * cell
+            ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
+            inside = foot.row(j)
+            for i in xrange(gw):
+                if not inside[i]:
+                    continue
+                nx = left + (i + 0.5) * cell
+                dx, dy, dz = ax + rx * nx, ay + ry * nx, az + rz * nx
+                k = 1.0 / sqrt(dx * dx + dy * dy + dz * dz)
+                dx *= k
+                dy *= k
+                dz *= k
+                a = V3(gx + dx * t0, gy + dy * t0, gz + dz * t0)
+                b = V3(gx + dx * t1, gy + dy * t1, gz + dz * t1)
+                if drift is not None:
+                    a, b = drift.applyPoint(a), drift.applyPoint(b)
+                hits = collide(a, b)
+                rays += 1
+                if hits:
+                    reach = t0 + hits[0][0]
+                    on_lfp = False
+                    if lfp is not None:
+                        p = lfp[0].applyPoint(V3(gx + dx * reach, gy + dy * reach,
+                                                 gz + dz * reach))
+                        on_lfp = p[2] >= lfp[1] and p[1] <= lfp[2]
+                    if on_lfp:
+                        lfp_cells += 1
+                    else:
+                        hidden = False
+                        seen = reach - COVER_GAP
+                        if cover and seen > 0.6:
+                            gun_a = V3(gx + dx * 0.3, gy + dy * 0.3, gz + dz * 0.3)
+                            gun_b = V3(gx + dx * seen, gy + dy * seen, gz + dz * seen)
+                            try:
+                                hidden = scene(space, gun_a, gun_b, SCENE_FLAGS) is not None
+                            except Exception:
+                                cover = hidden = False
+                            if not hidden:
+                                for fn in occluders:
+                                    try:
+                                        if fn(gun_a, gun_b):
+                                            hidden = True
+                                            break
+                                    except Exception:
+                                        pass
+                        if not hidden:
+                            size = reach * cell
+                            area = size * size
+                            opened += area
+                            plate = tuple((h[3], h[2], int(h[1] * 40)) for h in hits)
+                            for s, (_, rules, pp) in enumerate(shells):
+                                code = caches[s].get(plate)
+                                if code is None:
+                                    code = caches[s][plate] = shot_code(
+                                        hits, mats, get_mat, pp, rules, lo, lo)
+                                if code == PEN:
+                                    areas[s] += area
+                if not rays & 7 and clock() > self.deadline:
+                    yield
+                    # the player's vehicle may have died or changed its model meanwhile
+                    try:
+                        if not getattr(BigWorld.player(), 'isVehicleAlive', False):
+                            return
+                        me = BigWorld.entities.get(my_id)
+                        app = me.appearance
+                        if app is None or app.collisions is None:
+                            self._give_up(enemy_id)
+                            return
+                        collide = app.collisions.collideAllWorld
+                    except Exception:
+                        self._give_up(enemy_id)
+                        return
+                    if cover:
+                        occluders = _occluders(my_id, gun, center, radius, enemy_id)
+                    now = Math.Matrix(me.matrix)
+                    if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
+                        drift = Math.Matrix(base_inv)
+                        drift.postMultiply(now)
+                    else:
+                        drift = None
+        level = None
+        for (lv, _, _), area in zip(shells, areas):
+            if area >= need:
+                level = lv
+                break
+        self.found[enemy_id] = (level, BigWorld.time(), key, tuple(areas), opened,
+                                  BigWorld.time())
+        if self.owner.cfg['debug']:
+            log('threat: %s at %.0f m: %s; open %.2f m2, penetrated %s m2, %d cells on the lower '
+                'front plate, %d rays' % (
+                    name, dist, level or 'none', opened,
+                    ', '.join('%s %.2f' % (lv, area) for (lv, _, _), area in zip(shells, areas)),
+                    lfp_cells, rays))
+
+
 # ---- the mod ----
 
 class Heatmap(object):
@@ -2190,6 +2718,7 @@ class Heatmap(object):
         self._scan = {}             # targets on the screen, found once a frame (_on_screen)
         self._scan_no = -1
         self._walls = {}            # entity id -> (time, behind a wall?)
+        self.threats = ThreatMarks(self)
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
     # ---- files ----
@@ -3101,10 +3630,20 @@ class Heatmap(object):
         """One frame of work; returns the delay to the next one."""
         cfg = self.cfg
         player = BigWorld.player()
+        threats = self._threats_on(player)
+        if not threats:
+            self.threats.clear()
         if not cfg['enabled'] or not self.cache_ready or not self._can_aim(player):
             self._drop()
             self._drop_secondaries()
             self._drop_xrays()
+            if threats:
+                # the marks do without the heatmap
+                self.frame_no += 1
+                self._primary_seen = None
+                if self.threats.frame(player, BigWorld.time(),
+                                      self._threat_slice()):
+                    return 0.0
             return OFF_PERIOD
         now = BigWorld.time()
         if self.last_frame is not None and 0.0 < now - self.last_frame < 0.25:
@@ -3209,9 +3748,26 @@ class Heatmap(object):
             xray_active = self._frame_xrays(player, now)
         elif self.xrays:
             self._drop_xrays()
-        if target is not None or sec_active or xray_active:
+        # "!" over the enemies that can penetrate the player
+        threat_active = threats and self.threats.frame(player, now,
+                                                       self._threat_slice())
+        if target is not None or sec_active or xray_active or threat_active:
             return 0.0
         return IDLE_PERIOD
+
+    def _threats_on(self, player):
+        """Whether the threat marks are drawn: on in the settings, the player alive in battle
+        and the interface shown."""
+        if not self.cfg.get('threat_marks') or not self.cache_ready:
+            return False
+        if not isinstance(player, PlayerAvatar) or not getattr(player, 'isVehicleAlive', False):
+            return False
+        handler = getattr(player, 'inputHandler', None)
+        return handler is not None and bool(getattr(handler, 'isGuiVisible', True))
+
+    def _threat_slice(self):
+        """Seconds of a frame the threat marks may look for."""
+        return min(self._slice() * THREAT_SLICE_SHARE, THREAT_MAX_SLICE)
 
     def _on_screen(self, player):
         """{id: (entity, corners, box, view)} of the targets on the screen this frame, the
@@ -3360,9 +3916,10 @@ class Heatmap(object):
             if self.pic is not None:
                 self.pic = self.pic[:3] + (None,)
             self._hide_mark()
-        # invalidate secondary and xray overlays on any settings change
+        # invalidate secondary and xray overlays and the threat marks on any settings change
         self._drop_secondaries()
         self._drop_xrays()
+        self.threats.clear()
         if not cfg['enabled']:
             self._drop()
         elif self.in_battle and self.tick_cb is None:
@@ -3441,6 +3998,7 @@ class Heatmap(object):
             self.tick_cb = None
         self._drop_secondaries()
         self._drop_xrays()
+        self.threats.drop_textures()
         self.target = None
         self.job = None
         self.pic = self.pic_sig = self.last_key = self.cur_box = None
