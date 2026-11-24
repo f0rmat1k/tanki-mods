@@ -89,30 +89,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-import sys as _sys
-_grid_to_raw_native = None
-try:
-    _pyd_sec = ResMgr.openSection('mods/heatmap/heatmap_fast.pyd')
-    if _pyd_sec is not None:
-        _td = os.path.join(os.environ.get('TEMP', '.'), 'hm_native')
-        if not os.path.isdir(_td):
-            os.makedirs(_td)
-        _pyd_path = os.path.join(_td, 'heatmap_fast.pyd')
-        with open(_pyd_path, 'wb') as _f:
-            _f.write(str(_pyd_sec.asBinary))
-        _sys.path.insert(0, _td)
-        try:
-            from heatmap_fast import grid_to_raw as _grid_to_raw_native
-        except ImportError:
-            pass
-        finally:
-            if _td in _sys.path:
-                _sys.path.remove(_td)
-    del _pyd_sec
-except Exception:
-    pass
-
-__version__ = '0.16.6'
+__version__ = '0.16.9'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -197,11 +174,16 @@ DEFAULT_CELL_COST = 15e-6     # seconds of work per cell, as measured in the gam
 FAST_FILL = 0.85              # share of that time a fast pass is planned to take
 MIN_FAST_CELLS = 200          # a fast grid is never coarser than this many cells
 # "nothing moved" between two scenes (see scene_moved)
-STILL_VIEW_COS = math.cos(math.radians(0.5))   # the side the camera sees the target from
-STILL_GUN_COS = math.cos(math.radians(0.4))    # the side the gun shoots at it from
+STILL_VIEW_ANGLE = math.radians(0.5)   # the side the camera sees the target from
+STILL_GUN_ANGLE = math.radians(0.4)    # the side the gun shoots at it from
 STILL_DISTANCE = 0.03         # share of the distance from the target to the camera or the gun
 STILL_PART = 0.15             # meters a corner of a part's box moved on the target (turret, gun)
 STILL_ZOOM = 0.01             # share the zoom changed by
+STILL_PEN = 1.0               # mm of penetration (distance falloff) that count as no change
+# a sharp picture is kept, and a refining pass is let finish, while the scene stays within
+# this many times the "still" limits; enemies twitch their turrets all the time
+LOOSE = 3.0
+REFINE_STEP = 4.0             # each refining pass casts this many times the cells of the last
 # a still scene gets a new fine pass when its place on the screen changed this much
 REFRESH_SIZE = 0.05           # share of the box's width or height
 REFRESH_SHIFT = 0.25          # clip units (the screen is 2 wide) the box moved
@@ -572,11 +554,9 @@ def png_rgba(w, h, rows):
 
 def _png_from_codes(codes, gw, gh, palette):
     """PNG from a codes grid + palette list."""
-    if _grid_to_raw_native is not None:
-        raw = _grid_to_raw_native(str(codes), gw, gh, b''.join(palette))
-    else:
-        raw = b''.join([b'\x00' + b''.join([palette[c] for c in codes[j * gw:(j + 1) * gw]])
-                        for j in xrange(gh)])
+    pick = palette.__getitem__
+    raw = b''.join([b'\x00' + b''.join(map(pick, codes[j * gw:(j + 1) * gw]))
+                    for j in xrange(gh)])
     def chunk(tag, body):
         return (struct.pack('>I', len(body)) + tag + body +
                 struct.pack('>I', zlib.crc32(tag + body) & 0xFFFFFFFF))
@@ -830,22 +810,24 @@ def target_corners(target):
     return out
 
 
-def scene_moved(a, b):
+def scene_moved(a, b, loose=1.0):
     """True if scene b is not scene a seen again (scenes: Heatmap._scene). The camera and the
     gun are compared as directions and distances from the target, in its own frame, so turning
     the camera with the mouse is not a move, and a step of the player counts by the angle it
-    makes at the target."""
-    if a[0] != b[0] or len(a[3]) != len(b[3]) or abs(a[4] - b[4]) > STILL_ZOOM * a[4]:
+    makes at the target. loose widens every limit by that factor."""
+    if (a[0][0] != b[0][0] or abs(a[0][1] - b[0][1]) > STILL_PEN * loose
+            or len(a[3]) != len(b[3]) or abs(a[4] - b[4]) > STILL_ZOOM * loose * a[4]):
         return True
-    for p, q, limit in ((a[1], b[1], STILL_VIEW_COS), (a[2], b[2], STILL_GUN_COS)):
+    for p, q, angle in ((a[1], b[1], STILL_VIEW_ANGLE), (a[2], b[2], STILL_GUN_ANGLE)):
         lp = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2])
         lq = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2])
-        if lp < 0.01 or lq < 0.01 or abs(lp - lq) > STILL_DISTANCE * lp:
+        if lp < 0.01 or lq < 0.01 or abs(lp - lq) > STILL_DISTANCE * loose * lp:
             return True
-        if (p[0] * q[0] + p[1] * q[1] + p[2] * q[2]) / (lp * lq) < limit:
+        if (p[0] * q[0] + p[1] * q[1] + p[2] * q[2]) / (lp * lq) < math.cos(angle * loose):
             return True
+    part = STILL_PART * loose
     for p, q in zip(a[3], b[3]):
-        if abs(p[0] - q[0]) + abs(p[1] - q[1]) + abs(p[2] - q[2]) > STILL_PART:
+        if abs(p[0] - q[0]) + abs(p[1] - q[1]) + abs(p[2] - q[2]) > part:
             return True
     return False
 
@@ -2053,7 +2035,7 @@ class Heatmap(object):
         self.job = None           # generator of the pass in progress
         self.deadline = 0.0       # time.clock() at which the pass yields the frame
         self.next_pass = 0.0
-        self.last_key = None      # (scene, full grid?) of the last finished pass
+        self.last_key = None      # (scene, full grid?, level) of the last finished pass
         self.mark_comp = None     # the picture of the mark
         self.mark_uv = None       # where the mark is in the target's box: shares of it, from
                                   # the left and from the top
@@ -2061,7 +2043,7 @@ class Heatmap(object):
         self.grid = None          # the grid on screen, for finding the mark again: (codes,
                                   # gw, gh, left, top, cw, ch, box, cells per unit of dispersion)
         self.job_scene = None     # the scene the pass in progress was begun for
-        self.job_fine = False     # ... and whether it is a fine pass
+        self.job_fine = False     # ... and whether it refines (level > 0)
         self.pic = None           # (target id, (left, top, w, h) in clip coords, target box
                                   # then, the mark's place in clip coords then or None)
         self.pic_sig = None       # (w, h, rows) of the picture in the texture
@@ -2091,8 +2073,7 @@ class Heatmap(object):
         self._sec_robin = 0       # round-robin index for time-slicing among secondaries
         self.xrays = {}           # entity id -> XrayOverlay (enemies behind walls)
         self._xray_robin = 0
-        log('v%s loaded; cache=%s native=%s' % (__version__, self.cache_dir,
-            'yes' if _grid_to_raw_native else 'no'))
+        log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
     # ---- files ----
 
@@ -2515,9 +2496,11 @@ class Heatmap(object):
         strength = (1.0 - centre_t) * (1.0 - count_t)
         return 1.0 + (FOCUS_MAX_BOOST - 1.0) * strength
 
-    def _start_pass(self, player, target, view, corners, box, scene, fine):
-        """Begin a pass over the grid: a fine one with the full grid of the quality, or a fast
-        one with as many cells as there is time for."""
+    def _start_pass(self, player, target, view, corners, box, scene, level):
+        """Begin a pass over the grid. Level 0 is a fast one with as many cells as there is
+        time for between two updates; each next level casts REFINE_STEP times as many, up to
+        the full grid of the quality (a fine pass). Every level is shown when it is done, so a
+        still target sharpens step by step instead of waiting for one long pass."""
         shot = player.getVehicleDescriptor().shot
         shell = shot.shell
         kind = shell.kind
@@ -2554,7 +2537,9 @@ class Heatmap(object):
         # the grid cap toward w_px/min_cell (so cells stay close to min_cell pixels).
         # min_cell stays as the quality slider set it: higher quality = finer cells.
         # The boost factor (1.0 .. FOCUS_MAX_BOOST) says how far from base toward ideal.
-        boost = self._focus_boost(box, self._count_on_screen(player, view))
+        n_visible = self._count_on_screen(player, view)
+        boost = self._focus_boost(box, n_visible)
+        base_gw, base_gh = grid_w, grid_h
         if boost > 1.0:
             # the ideal grid that makes cells exactly min_cell pixels, hard-capped
             ideal_w = min(int(w_px / min_cell) + 1, FOCUS_MAX_GRID)
@@ -2563,12 +2548,17 @@ class Heatmap(object):
             grid_w = max(grid_w, int(grid_w + (ideal_w - grid_w) * t))
             grid_h = max(grid_h, int(grid_h + (ideal_h - grid_h) * t))
         finest = max(min_cell, w_px / grid_w, h_px / grid_h)
-        cell = finest
-        if not fine:
-            cell = max(finest, math.sqrt(w_px * h_px / self._fast_cells()))
-        full = cell <= finest * 1.001     # a fast pass that could afford the whole grid
+        # a focused target gets boost times the cells at every level
+        budget = self._fast_cells() * boost * REFINE_STEP ** level
+        cell = max(finest, math.sqrt(w_px * h_px / budget))
+        full = cell <= finest * 1.001     # the whole grid of the quality
         gw = min(grid_w, max(1, int(math.ceil(w_px / cell - 1e-6))))
         gh = min(grid_h, max(1, int(math.ceil(h_px / cell - 1e-6))))
+        if self.cfg['debug']:
+            log('focus: visible=%d boost=%.2f cap %dx%d -> %dx%d level %d grid %dx%d '
+                'cell %.1f px target_px=%.0fx%.0f min_cell=%.1f%s'
+                % (n_visible, boost, base_gw, base_gh, grid_w, grid_h, level, gw, gh, cell,
+                   w_px, h_px, min_cell, ' full' if full else ''))
         cw, ch = cell * 2.0 / sw, cell * 2.0 / sh
         left = (x0 + x1) * 0.5 - gw * cw * 0.5
         top = (y0 + y1) * 0.5 + gh * ch * 0.5
@@ -2584,9 +2574,9 @@ class Heatmap(object):
             disp = self._dispersion(player)
             per_disp = distance / (cam_dist * view.tan_y) * 0.5 * sh / cell
             aim = (disp, per_disp, self._mark_cell(box, (left, top, cw, ch)))
-        self.job_scene, self.job_fine = scene, fine
+        self.job_scene, self.job_fine = scene, level > 0
         self.job = self._pass(target, view, (gw, gh, left, top, cw, ch), span, box, rules,
-                              full_pp, gun, (scene, full), he_result, aim)
+                              full_pp, gun, (scene, full, level), he_result, aim)
 
     @staticmethod
     def _dispersion(player):
@@ -2918,7 +2908,7 @@ class Heatmap(object):
         if self.report:
             self.report -= 1
             self.panel.redraw()
-        kind = 'fine pass' if fine else 'fast pass'
+        kind = 'fine pass' if done[1] else 'refine pass' if fine else 'fast pass'
         if self.cfg['debug'] or kind not in self.logged:
             self.logged.add(kind)
             log('%s %d: %s grid %dx%d, %d cells on armor, %d of them behind cover, %s pen '
@@ -2970,20 +2960,26 @@ class Heatmap(object):
                 scene = None
                 if self.job is not None and self.job_fine:
                     scene = self._scene(player, target, view, corners, box)
-                    if scene_moved(self.job_scene, scene):
+                    if scene_moved(self.job_scene, scene, LOOSE):
                         self.job = None
                         self.next_pass = now
                 if self.job is None and now >= self.next_pass:
                     if scene is None:
                         scene = self._scene(player, target, view, corners, box)
                     done = self.last_key
-                    if done is None or scene_moved(done[0], scene):
-                        fine = False
-                    elif not done[1] or box_drifted(done[0][5], box):
-                        fine = True
+                    if done is None or scene_moved(done[0], scene, LOOSE):
+                        level = 0
+                    elif scene_moved(done[0], scene):
+                        # a small change: the same sharpness again, the picture on the screen
+                        # stays meanwhile; refining further would not keep up with it
+                        level = done[2]
+                    elif not done[1]:
+                        level = done[2] + 1
+                    elif box_drifted(done[0][5], box):
+                        level = done[2]
                     else:
-                        fine = None
-                    if fine is None:
+                        level = None
+                    if level is None:
                         self.next_pass = now + STILL_CHECK_PERIOD
                         if self.grid is not None and self.mark_disp > 0.0:
                             disp = self._dispersion(player)
@@ -2993,7 +2989,7 @@ class Heatmap(object):
                     else:
                         self.next_pass = now + 1.0 / self.res[5]
                         self.pass_start = now
-                        self._start_pass(player, target, view, corners, box, scene, fine)
+                        self._start_pass(player, target, view, corners, box, scene, level)
                 if self.job is not None:
                     self.deadline = time.clock() + self._slice()
                     try:
@@ -3031,15 +3027,18 @@ class Heatmap(object):
         except Exception:
             return 1       # assume at least the primary target
         for entity in entities:
-            if not self._is_target(entity, player):
-                continue
-            corners = target_corners(entity)
-            box = view.box(corners)
-            if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
-                continue
-            count += 1
-            if count > FOCUS_FEW:
-                return count    # no point counting further
+            try:
+                if not self._is_target(entity, player):
+                    continue
+                corners = target_corners(entity)
+                box = view.box(corners)
+                if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
+                    continue
+                count += 1
+                if count > FOCUS_FEW:
+                    return count    # no point counting further
+            except Exception:
+                pass   # one bad entity must not break the whole count
         return max(count, 1)
 
     def _visible_enemies(self, player):

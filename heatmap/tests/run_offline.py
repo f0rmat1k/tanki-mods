@@ -542,25 +542,35 @@ check(saved['quality'] == 5 and saved['grid_w'] is None
       and saved['slice_ms'] is None and '_help' in saved and saved['alpha'] == 0.5,
       'settings file rewritten with quality')
 orig_publish = g._publish
+orig_pass = g._pass
+JOB_FULL = [False]     # whether the pass in progress casts the full grid
+
+
+def track_pass(*args):
+    JOB_FULL[0] = bool(args[8][1])     # done = (scene, full, level)
+    return orig_pass(*args)
 
 
 def publish(target, codes, gw, gh, rect, box, mark=None):
     entry = (bytes(codes), gw, gh, rect, box)
     PUBLISHED.append(entry)
     ALL.append(entry)
-    FINE[id(entry)] = bool(g.job_fine)
+    FINE[id(entry)] = ('fast' if not g.job_fine else 'fine' if JOB_FULL[0] else 'refine')
     orig_publish(target, codes, gw, gh, rect, box, mark)
 
 
-ALL, FINE = [], {}     # every pass published, and whether it was a fine one
+ALL, FINE = [], {}     # every pass published, and its kind: fast / refine / fine
 
 
-def kinds(passes=None):
-    """'fast' / 'fine' of the passes (default: those in PUBLISHED)."""
-    return ['fine' if FINE[id(p)] else 'fast' for p in (PUBLISHED if passes is None else passes)]
+def kinds(passes=None, refines=False):
+    """'fast' / 'fine' of the passes (default: those in PUBLISHED); the refining steps between
+    them are left out unless refines."""
+    out = [FINE[id(p)] for p in (PUBLISHED if passes is None else passes)]
+    return out if refines else [k for k in out if k != 'refine']
 
 
 g._publish = publish
+g._pass = track_pass
 EVENTS.onAvatarReady()
 check(len(STATE.callbacks) == 1, 'tick scheduled at battle start')
 
@@ -616,6 +626,13 @@ check(len(png) == 2, 'the fast and the fine PNG in the cache')
 shutil.copy(os.path.join(CACHE, g.files[-1]), os.path.join(OUT, 'ap.png'))
 shutil.copy(os.path.join(CACHE, g.files[0]), os.path.join(OUT, 'ap_fast.png'))
 game_codes = codes
+
+# add extra enemies so _count_on_screen > FOCUS_FEW and boost=1.0 for the rest of the tests
+# (focus boost was already verified on the grid above)
+_crowd_a = Vehicle(80, 2, (-4.0, 0.0, 20.0), 0.0)
+_crowd_b = Vehicle(81, 2, (5.0, 0.0, 24.0), 0.0)
+ENTITIES[_crowd_a.id] = _crowd_a
+ENTITIES[_crowd_b.id] = _crowd_b
 
 # the port of the rules gives the same picture as the game's functions
 g.use_game_rules = False
@@ -686,7 +703,7 @@ g.last_key = None
 frames(200)  # the fast pass completes; a fine pass starts and completes (more frames for focus-boosted grid)
 check(g.last_key is not None and g.last_key[1], 'a fine pass completed')
 # now invalidate and use a tiny slice so the NEXT fine pass stays in progress
-g.last_key = (g.last_key[0], False)  # mark last pass as not-full to trigger fine pass
+g.last_key = (g.last_key[0], False, g.last_key[2])  # not-full: a refining pass follows
 g.res = g.res[:4] + (0.5,) + g.res[5:]   # 0.5ms slice
 g.next_pass = 0.0                         # do not wait for the update interval
 _clock_step[0] = 50e-6   # mock clock: each call advances 50us so the deadline fires
@@ -694,23 +711,43 @@ frames(8)
 _clock_step[0] = 0.0     # back to real clock
 check(g.job is not None and g.job_fine, 'a fine pass under way')
 n = len(PUBLISHED)
-drive()
-drive()
-drive()
-drive()
-drive()
-drive()
-drive()
-drive()
-drive()
-drive()
+running = g.job
+for _ in range(10):
+    drive()
+frames(2)
+check(g.job is running and g.job_fine, 'a small move (0.2 m) lets it finish')
+for _ in range(60):
+    drive()
 frames(2)
 check(g.job is not None and not g.job_fine and len(PUBLISHED) == n,
-      'it is dropped for a fast one when the target moves')
+      'it is dropped for a fast one when the target moves far')
 enemy.matrix.translation = (1.0, 0.0, 22.0)
 g.res = g.res[:4] + (None,) + g.res[5:]   # restore normal slice
 frames(600)
 check(kinds()[-1] == 'fine', 'fine again after it stopped')
+
+# a target that stands but twitches its turret (as players aim) still gets the fine map, and a
+# sharp picture is not swapped for a coarse one by the twitching
+yaw0 = enemy.turret_yaw
+twitch = [0]
+
+
+def jitter():
+    twitch[0] += 1
+    enemy.turret_yaw = yaw0 + math.radians(1.0) * (1 if twitch[0] % 6 < 3 else -1)
+
+
+g.job = None
+g.last_key = None
+n = len(PUBLISHED)
+frames(1200, each=jitter)
+twitched = kinds(PUBLISHED[n:], refines=True)
+print('     twitching turret: %s' % twitched)
+check('fine' in twitched, 'a twitching turret still gets the fine map')
+last_fine = max(i for i, k in enumerate(twitched) if k == 'fine')
+check(all(k != 'fast' for k in twitched[last_fine:]), 'and keeps it sharp while it twitches')
+enemy.turret_yaw = yaw0
+frames(300)
 
 # HEAT and HE
 STATE.player.shell.kind, STATE.player.shell.compactDescr = 'HOLLOW_CHARGE', 1002
@@ -887,6 +924,8 @@ EVENTS.onAvatarBecomeNonPlayer()   # flush cost to file
 stored = json.load(open(CONFIG))['_cell_cost_us']
 check(5.0 < stored < 2000.0 and abs(g.cost * 1e6 - stored) < 0.3 * stored,
       'the cost of a cell is kept in the settings file (%.1f us here)' % stored)
+del ENTITIES[_crowd_a.id]
+del ENTITIES[_crowd_b.id]
 battle_with(quality=5, grid_w=None, slice_ms=None, updates_per_sec=None)
 
 # ---- the settings panel ----

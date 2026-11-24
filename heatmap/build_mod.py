@@ -88,13 +88,6 @@ def build():
                 zip_entry(z, 'res/scripts/client/gui/mods/' + name + 'c', f.read())
         with open(font, 'rb') as f:
             zip_entry(z, 'res/mods/%s/font.bin' % MOD_ID, f.read())
-        pyd = os.path.join(HERE, 'native', 'heatmap_fast.pyd')
-        if os.path.isfile(pyd):
-            with open(pyd, 'rb') as f:
-                zip_entry(z, 'res/mods/%s/heatmap_fast.pyd' % MOD_ID, f.read())
-            print('bundled heatmap_fast.pyd (%d bytes)' % os.path.getsize(pyd))
-        else:
-            print('WARNING: native/heatmap_fast.pyd not found, building without native acceleration')
     print('built %s (%d bytes)' % (target, os.path.getsize(target)))
     return target
 
