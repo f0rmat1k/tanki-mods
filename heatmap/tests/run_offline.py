@@ -642,6 +642,35 @@ check(kinds()[-2:] == ['fast', 'fine'] and PUBLISHED[-1][0] == game_codes,
       'port of the rules = game rules')
 g.use_game_rules = True
 
+# cells outside the outlines of the parts get no ray, and the map is the same cell for cell as
+# with a ray in every cell
+real_row = hm.Footprint.row
+
+
+def every_row(self, j):
+    return bytearray(b'\x01' * self.gw)
+
+
+def fine_map():
+    g.job = None
+    g.last_key = None
+    k = len(PUBLISHED)
+    frames(600)
+    return [p for p in PUBLISHED[k:] if FINE[id(p)] == 'fine'][-1]
+
+
+masked = fine_map()
+hm.Footprint.row = every_row
+unmasked = fine_map()
+hm.Footprint.row = real_row
+outside = hm.Footprint(hm.View(), hm.target_corners(enemy),
+                       (masked[1], masked[2], masked[3][0], masked[3][1],
+                        masked[3][2] / masked[1], masked[3][3] / masked[2]))
+n_out = sum(outside.row(j).count(b'\x00') for j in range(masked[2]))
+print('     %d of %d cells outside the part outlines' % (n_out, masked[1] * masked[2]))
+check(masked[1:3] == unmasked[1:3] and masked[0] == unmasked[0] and n_out > 50,
+      'skipping the cells outside the parts changes nothing')
+
 # the camera turns: the picture follows at once, and the fine map stays, it is still true
 n = len(PUBLISHED)
 before = comp.position
@@ -652,8 +681,8 @@ frames(300)
 check(len(PUBLISHED) == n, 'turning the camera a little keeps the fine map')
 STATE.cam = look_at((0.0, 6.0, -12.0), (9.0, 1.5, 22.0))
 frames(600)
-check(kinds()[n:] == ['fine'], 'a long way across the screen: the fine map is cast again %r'
-      % kinds()[n:])
+check(kinds(PUBLISHED[n:]) == ['fine'], 'a long way across the screen: the fine map is cast again %r'
+      % kinds(PUBLISHED[n:]))
 STATE.cam = look_at((0.0, 6.0, -12.0), (2.5, 1.5, 22.0))
 frames(600)
 
@@ -661,7 +690,7 @@ frames(600)
 n = len(PUBLISHED)
 STATE.cam = look_at((1.5, 6.0, -12.0), (4.0, 1.5, 22.0))
 frames(600)
-check(kinds()[n:] == ['fast', 'fine'], 'the player moved: fast, then fine %r' % kinds()[n:])
+check(kinds(PUBLISHED[n:]) == ['fast', 'fine'], 'the player moved: fast, then fine %r' % kinds(PUBLISHED[n:]))
 STATE.cam = look_at((0.0, 6.0, -12.0), (2.5, 1.5, 22.0))
 frames(600)
 
@@ -669,10 +698,12 @@ frames(600)
 real_fast_cells = g._fast_cells
 g._fast_cells = lambda: 600.0
 g.res = g.res[:4] + (0.05,) + g.res[5:]
+g.job = None
 g.last_key = None
 n = len(PUBLISHED)
 frames(150)
-check(kinds()[n:n + 1] == ['fast'], 'a fast pass of the still target to compare with')
+check(kinds(PUBLISHED[n:], refines=True)[:1] == ['fast'],
+      'a fast pass of the still target to compare with')
 still = PUBLISHED[n]
 
 
@@ -902,9 +933,24 @@ check(g._slice() == 0.0015, 'at 30 the least')
 EVENTS.onAvatarReady()
 
 # updates per second: the fast grid is sized to the time there is, by the measured cost
+START_DELAY = []      # seconds from the start of driving to the first new picture
+
+
 def driving(seconds, **settings):
-    """Fast passes of a battle in which the target drives: (how many a second, cells each)."""
+    """Fast passes of a battle in which the target drives: (how many a second, cells each).
+    The first half second is left out: a target that starts to move first gets the sharp map
+    cast again, until it has gone further than the LOOSE limits."""
     battle_with(**settings)
+    del PUBLISHED[:]
+    started = [None]
+
+    def drive_and_watch():
+        drive()
+        if started[0] is None and PUBLISHED:
+            started[0] = STATE.time
+    t0 = STATE.time
+    frames(50, each=drive_and_watch)
+    START_DELAY.append((started[0] or STATE.time) - t0)
     del PUBLISHED[:]
     frames(int(seconds * 100), each=drive)
     enemy.matrix.translation = (1.0, 0.0, 22.0)
@@ -913,11 +959,13 @@ def driving(seconds, **settings):
 
 
 rate5, cells5 = driving(3, quality=8, slice_ms=8, updates_per_sec=5)
-check(set(kinds()) == set(['fast']), 'driving: fast passes only')
+check(set(kinds(refines=True)) == set(['fast']), 'driving: fast passes only %r' % sorted(set(kinds(refines=True))))
 rate10, cells10 = driving(3, updates_per_sec=10)
 print('     driving at max: %.1f passes a second of %d cells, %.1f of %d cells'
       % (rate5, cells5, rate10, cells10))
 check(4.0 <= rate5 <= 5.4 and 8.0 <= rate10 <= 10.8, 'the asked number of updates a second is kept')
+print('     a new picture %.2f s and %.2f s after the target starts to move' % tuple(START_DELAY))
+check(max(START_DELAY) <= 0.45, 'a target that starts to move gets a new picture soon')
 check(1.4 < cells5 / cells10 < 5.0 and cells5 < 304 * 228,
       'by a coarser grid: twice the rate, fewer cells')
 EVENTS.onAvatarBecomeNonPlayer()   # flush cost to file
@@ -1121,6 +1169,16 @@ ally_kept = [i for i in range(len(ally_codes)) if ally_codes[i] != '\x00']
 print('     ally: %d cells hidden, %d left' % (len(ally_gone), len(ally_kept)))
 check(len(ally_gone) > 10 and len(ally_kept) > 10,
       'a live ally hides part of the target')
+# an ally far off the line from the camera to the target is not asked at all
+ally_aside = Vehicle(52, 1, (60.0, 0.0, 15.0), 0.0)
+ENTITIES[ally_aside.id] = ally_aside
+g.last_key = None
+del PUBLISHED[:]
+frames(600)
+check(PUBLISHED and PUBLISHED[-1][0] == ally_codes and ally_aside.appearance.collisions.calls == 0
+      and ally_blocker.appearance.collisions.calls > 0,
+      'an ally far aside is not tested against (%d calls)' % ally_aside.appearance.collisions.calls)
+del ENTITIES[ally_aside.id]
 # an ally with no collisions is silently skipped
 ally_blocker.appearance = Obj(collisions=None, compoundModel=ally_blocker.appearance.compoundModel)
 g.last_key = None

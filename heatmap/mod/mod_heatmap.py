@@ -89,7 +89,7 @@ try:
 except Exception:
     computeDistanceFactor = None
 
-__version__ = '0.16.9'
+__version__ = '1.0.0'
 
 MOD_ID = 'heatmap'
 CONFIG_PATH = os.path.join('mods', 'configs', MOD_ID, MOD_ID + '.json')
@@ -184,6 +184,10 @@ STILL_PEN = 1.0               # mm of penetration (distance falloff) that count 
 # this many times the "still" limits; enemies twitch their turrets all the time
 LOOSE = 3.0
 REFINE_STEP = 4.0             # each refining pass casts this many times the cells of the last
+PART_GROW = 0.3               # meters the part outlines are widened by (Footprint)
+OCCLUDER_REACH = 10.0         # meters from the camera-target line a vehicle may hide it from
+OCCLUDER_REFRESH = 0.25       # seconds between looks for such vehicles during a pass
+WALL_PERIOD = 0.15            # seconds an enemy's "behind a wall" answer is kept (xray)
 # a still scene gets a new fine pass when its place on the screen changed this much
 REFRESH_SIZE = 0.05           # share of the box's width or height
 REFRESH_SHIFT = 0.25          # clip units (the screen is 2 wide) the box moved
@@ -204,74 +208,6 @@ TRACE_FORWARD = 20.0
 # the camera ray is reused as the shot when the gun sees the point at nearly the same angle (0.5 deg)
 PARALLAX_COS = math.cos(math.radians(2.0))
 MAX_HIT_ANGLE = math.pi / 2.0 - 1e-05
-
-
-def _collect_wrecks(target_id):
-    """collideAllWorld callables for destroyed vehicles (wrecks) in the scene.
-
-    Returns a list of callables ``fn(a, b) -> hits``, each the collision model of a dead
-    vehicle that might occlude a living target.  The target itself is excluded, and vehicles
-    whose collision model has already been unloaded are silently skipped.
-    """
-    wrecks = []
-    try:
-        for entity in BigWorld.entities.values():
-            if entity.id == target_id:
-                continue
-            if entity.__class__.__name__ != 'Vehicle':
-                continue
-            if getattr(entity, 'isAlive', lambda: True)():
-                continue
-            app = getattr(entity, 'appearance', None)
-            if app is None:
-                continue
-            coll = getattr(app, 'collisions', None)
-            if coll is None:
-                continue
-            fn = getattr(coll, 'collideAllWorld', None)
-            if fn is not None:
-                wrecks.append(fn)
-    except Exception:
-        pass
-    return wrecks
-
-
-def _collect_allies(target_id):
-    """collideAllWorld callables for live allied vehicles that may occlude the target.
-
-    Returns a list of callables ``fn(a, b) -> hits``, each the collision model of a
-    living ally (same team as the player, excluding the player's own vehicle) that
-    stands between the camera and the enemy target.
-    """
-    allies = []
-    try:
-        player = BigWorld.player()
-        my_team = player.team
-        my_id = getattr(player, 'playerVehicleID', None)
-        for entity in BigWorld.entities.values():
-            if entity.id == target_id or entity.id == my_id:
-                continue
-            if entity.__class__.__name__ != 'Vehicle':
-                continue
-            if not getattr(entity, 'isAlive', lambda: True)():
-                continue
-            try:
-                if entity.publicInfo['team'] != my_team:
-                    continue
-            except Exception:
-                continue
-            app = getattr(entity, 'appearance', None)
-            if app is None:
-                continue
-            coll = getattr(app, 'collisions', None)
-            if coll is None:
-                continue
-            fn = getattr(coll, 'collideAllWorld', None)
-            if fn is not None:
-                allies.append(fn)
-    except Exception:
-        pass
-    return allies
 
 
 # ---- grid optimizations ----
@@ -810,11 +746,156 @@ def target_corners(target):
     return out
 
 
-def scene_moved(a, b, loose=1.0):
+def _hull2d(points):
+    """Convex hull of 2D points, counter-clockwise (monotone chain)."""
+    pts = sorted(set(points))
+    if len(pts) < 3:
+        return pts
+
+    def turn(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and turn(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and turn(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+class Footprint(object):
+    """Where on a grid the target can be. The collision model lies within the boxes of its
+    parts, so a ray through a cell's centre outside the screen outlines of all of them misses:
+    such cells need no ray. The outlines are widened by PART_GROW meters, for a turret that
+    turns while a pass runs. Without all the parts every cell counts as inside. Also the
+    sphere around the target (center, radius) for the cover tests."""
+
+    def __init__(self, view, corners, grid):
+        gw, gh, left, top, cw, ch = grid
+        self.gw, self.left, self.top, self.cw, self.ch = gw, left, top, cw, ch
+        n = float(len(corners))
+        cx = sum(c[0] for c in corners) / n
+        cy = sum(c[1] for c in corners) / n
+        cz = sum(c[2] for c in corners) / n
+        self.center = (cx, cy, cz)
+        self.radius = math.sqrt(max((c[0] - cx) ** 2 + (c[1] - cy) ** 2 + (c[2] - cz) ** 2
+                                    for c in corners))
+        self.rows = [None] * gh
+        self.hulls = None
+        if len(corners) != 8 * len(PARTS):
+            return
+        px, py, pz = view.pos
+        rx, ry, rz = view.right
+        ux, uy, uz = view.up
+        fx, fy, fz = view.fwd
+        tan_x, tan_y = view.tan_x, view.tan_y
+        flat, nearest = [], 1e9
+        for x, y, z in corners:
+            vx, vy, vz = x - px, y - py, z - pz
+            depth = vx * fx + vy * fy + vz * fz
+            if depth <= 0.01:
+                return
+            nearest = min(nearest, depth)
+            flat.append(((vx * rx + vy * ry + vz * rz) / depth / tan_x,
+                         (vx * ux + vy * uy + vz * uz) / depth / tan_y))
+        self.hulls = [_hull2d(flat[k:k + 8]) for k in xrange(0, len(flat), 8)]
+        # a part moved by PART_GROW meters shifts on the screen by at most this much, the
+        # (1 + tan) for the shift along the view direction; and a quarter cell for rounding
+        self.pad_x = PART_GROW * (1.0 + tan_x) / (nearest * tan_x) + cw * 0.25
+        self.pad_y = PART_GROW * (1.0 + tan_y) / (nearest * tan_y) + ch * 0.25
+
+    def row(self, j):
+        """bytearray of the row's cells: 1 where the target can be."""
+        m = self.rows[j]
+        if m is not None:
+            return m
+        gw = self.gw
+        if self.hulls is None:
+            m = self.rows[j] = bytearray(b'\x01' * gw)
+            return m
+        m = bytearray(gw)
+        yc = self.top - (j + 0.5) * self.ch
+        lo_y, hi_y = yc - self.pad_y, yc + self.pad_y
+        left, cw, pad_x = self.left, self.cw, self.pad_x
+        for hull in self.hulls:
+            # the hull's extent in x over the band lo_y..hi_y: its corners in the band and
+            # where its edges cross the band's borders
+            x0, x1 = 1e9, -1e9
+            prev = hull[-1]
+            for p in hull:
+                if lo_y <= p[1] <= hi_y:
+                    if p[0] < x0:
+                        x0 = p[0]
+                    if p[0] > x1:
+                        x1 = p[0]
+                ay, by = prev[1], p[1]
+                if ay != by:
+                    for yy in (lo_y, hi_y):
+                        if (ay <= yy <= by) or (by <= yy <= ay):
+                            x = prev[0] + (yy - ay) * (p[0] - prev[0]) / (by - ay)
+                            if x < x0:
+                                x0 = x
+                            if x > x1:
+                                x1 = x
+                prev = p
+            if x0 > x1:
+                continue
+            a = max(0, int(math.ceil((x0 - pad_x - left) / cw - 0.5)))
+            b = min(gw - 1, int(math.floor((x1 + pad_x - left) / cw - 0.5)))
+            if a <= b:
+                m[a:b + 1] = b'\x01' * (b - a + 1)
+        self.rows[j] = m
+        return m
+
+
+def _occluders(target_id, cam, center, radius):
+    """collideAllWorld of the vehicles that may hide the target from the camera: live allies
+    (not the player) and wrecks, only those near the line from the camera to the target."""
+    out = []
+    try:
+        player = BigWorld.player()
+        my_team = player.team
+        my_id = getattr(player, 'playerVehicleID', None)
+        entities = BigWorld.entities.values()
+    except Exception:
+        return out
+    dx, dy, dz = center[0] - cam[0], center[1] - cam[1], center[2] - cam[2]
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if length < 0.01:
+        return out
+    dx, dy, dz = dx / length, dy / length, dz / length
+    reach = (radius + OCCLUDER_REACH) ** 2
+    for entity in entities:
+        try:
+            if entity.id == target_id or entity.id == my_id:
+                continue
+            if entity.__class__.__name__ != 'Vehicle':
+                continue
+            if entity.isAlive() and entity.publicInfo['team'] != my_team:
+                continue
+            fn = entity.appearance.collisions.collideAllWorld
+            p = entity.position
+            vx, vy, vz = p.x - cam[0], p.y - cam[1], p.z - cam[2]
+            t = vx * dx + vy * dy + vz * dz
+            if t < -OCCLUDER_REACH or t > length + OCCLUDER_REACH:
+                continue
+            if vx * vx + vy * vy + vz * vz - t * t > reach:
+                continue
+            out.append(fn)
+        except Exception:
+            continue
+    return out
+
+
+def scene_moved(a, b, loose=1.0, parts=True):
     """True if scene b is not scene a seen again (scenes: Heatmap._scene). The camera and the
     gun are compared as directions and distances from the target, in its own frame, so turning
     the camera with the mouse is not a move, and a step of the player counts by the angle it
-    makes at the target. loose widens every limit by that factor."""
+    makes at the target. loose widens every limit by that factor; parts=False leaves out the
+    turret and the gun of the target."""
     if (a[0][0] != b[0][0] or abs(a[0][1] - b[0][1]) > STILL_PEN * loose
             or len(a[3]) != len(b[3]) or abs(a[4] - b[4]) > STILL_ZOOM * loose * a[4]):
         return True
@@ -825,6 +906,8 @@ def scene_moved(a, b, loose=1.0):
             return True
         if (p[0] * q[0] + p[1] * q[1] + p[2] * q[2]) / (lp * lq) < math.cos(angle * loose):
             return True
+    if not parts:
+        return False
     part = STILL_PART * loose
     for p, q in zip(a[3], b[3]):
         if abs(p[0] - q[0]) + abs(p[1] - q[1]) + abs(p[2] - q[2]) > part:
@@ -1685,10 +1768,12 @@ class SecondaryOverlay(object):
                              + (cz - view.pos[2]) ** 2)
         span = (max(view.near, cam_dist - radius - 0.5), cam_dist + radius + 0.5)
         self.job_scene, self.job_fine = scene, fine
-        self.job = self._do_pass(target, view, (gw, gh, left, top, cw, ch), span, box, rules,
-                                 full_pp, gun, (scene, full), he_result)
+        grid = (gw, gh, left, top, cw, ch)
+        self.job = self._do_pass(target, view, grid, span, box, rules, full_pp, gun,
+                                 (scene, full), he_result, Footprint(view, corners, grid))
 
-    def _do_pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result):
+    def _do_pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result,
+                 foot):
         """Cast the grid: like Heatmap._pass but without best-point analysis."""
         owner = self.owner
         gw, gh, left, top, cw, ch = grid
@@ -1708,8 +1793,8 @@ class SecondaryOverlay(object):
         collide = target.appearance.collisions.collideAllWorld
         cover = bool(owner.cfg['hide_covered']) and not owner.cover_failed
         scene_fn, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
-        wreck_fns = _collect_wrecks(target.id) if cover else []
-        ally_fns = _collect_allies(target.id) if cover else []
+        occluders = _occluders(target.id, view.pos, foot.center, foot.radius) if cover else []
+        occ_time = BigWorld.time()
         covered_code = COVERED if owner.palette[COVERED + PEN][3:] != b'\x00' else None
         get_mat = target.getMatinfo
         mats = {}
@@ -1725,7 +1810,10 @@ class SecondaryOverlay(object):
             ny = (top - (j + 0.5) * ch) * tan_y
             ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
             row = j * gw
+            inside = foot.row(j)
             for i in xrange(gw):
+                if not inside[i]:
+                    continue    # no part of the target there: the ray would miss
                 nx = (left + (i + 0.5) * cw) * tan_x
                 dx, dy, dz = ax + rx * nx, ay + ry * nx, az + rz * nx
                 k = 1.0 / sqrt(dx * dx + dy * dy + dz * dz)
@@ -1740,33 +1828,7 @@ class SecondaryOverlay(object):
                 hits = collide(a, b)
                 if hits:
                     d0 = hits[0][0]
-                    hx, hy, hz = sx + dx * d0, sy + dy * d0, sz + dz * d0
-                    qx, qy, qz = hx - gun_x, hy - gun_y, hz - gun_z
-                    ql = sqrt(qx * qx + qy * qy + qz * qz)
-                    code = None
-                    if ql > 0.01:
-                        qx /= ql
-                        qy /= ql
-                        qz /= ql
-                        if he_result is not None or dx * qx + dy * qy + dz * qz < PARALLAX_COS:
-                            a = V3(hx - qx * TRACE_BACK, hy - qy * TRACE_BACK,
-                                   hz - qz * TRACE_BACK)
-                            b = V3(hx + qx * TRACE_FORWARD, hy + qy * TRACE_FORWARD,
-                                   hz + qz * TRACE_FORWARD)
-                            if drift is not None:
-                                a, b = drift.applyPoint(a), drift.applyPoint(b)
-                            if he_result is not None:
-                                details = target.collideSegmentExt(a, b)
-                                code = NO_PEN
-                                if details:
-                                    code = HE_CODES.get(int(he_result(
-                                        details, full_pp, shell, min_pp, max_pp, target)), NO_PEN)
-                            else:
-                                shot_hits = collide(a, b)
-                                if shot_hits:
-                                    hits = shot_hits
-                    if code is None:
-                        code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
+                    hidden = False
                     if cover:
                         seen = t0 + d0 - COVER_GAP
                         if seen > 1.0:
@@ -1780,23 +1842,46 @@ class SecondaryOverlay(object):
                                 cover = hidden = False
                                 owner.cover_failed = True
                             if not hidden:
-                                for wfn in wreck_fns:
+                                for fn in occluders:
                                     try:
-                                        if wfn(cam_a, cam_b):
+                                        if fn(cam_a, cam_b):
                                             hidden = True
                                             break
                                     except Exception:
                                         pass
-                            if not hidden:
-                                for afn in ally_fns:
-                                    try:
-                                        if afn(cam_a, cam_b):
-                                            hidden = True
-                                            break
-                                    except Exception:
-                                        pass
-                            if hidden:
-                                code = MISS if covered_code is None else code | covered_code
+                    if hidden and covered_code is None:
+                        code = MISS
+                    else:
+                        hx, hy, hz = sx + dx * d0, sy + dy * d0, sz + dz * d0
+                        qx, qy, qz = hx - gun_x, hy - gun_y, hz - gun_z
+                        ql = sqrt(qx * qx + qy * qy + qz * qz)
+                        code = None
+                        if ql > 0.01:
+                            qx /= ql
+                            qy /= ql
+                            qz /= ql
+                            if he_result is not None or dx * qx + dy * qy + dz * qz < PARALLAX_COS:
+                                a = V3(hx - qx * TRACE_BACK, hy - qy * TRACE_BACK,
+                                       hz - qz * TRACE_BACK)
+                                b = V3(hx + qx * TRACE_FORWARD, hy + qy * TRACE_FORWARD,
+                                       hz + qz * TRACE_FORWARD)
+                                if drift is not None:
+                                    a, b = drift.applyPoint(a), drift.applyPoint(b)
+                                if he_result is not None:
+                                    details = target.collideSegmentExt(a, b)
+                                    code = NO_PEN
+                                    if details:
+                                        code = HE_CODES.get(int(he_result(
+                                            details, full_pp, shell, min_pp, max_pp, target)),
+                                            NO_PEN)
+                                else:
+                                    shot_hits = collide(a, b)
+                                    if shot_hits:
+                                        hits = shot_hits
+                        if code is None:
+                            code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
+                        if hidden:
+                            code |= covered_code
                     codes[row + i] = code
                 if not (row + i) & 7 and clock() > self.deadline:
                     yield
@@ -1808,9 +1893,9 @@ class SecondaryOverlay(object):
                         collide = app.collisions.collideAllWorld
                     except Exception:
                         return
-                    if cover:
-                        wreck_fns = _collect_wrecks(target.id)
-                        ally_fns = _collect_allies(target.id)
+                    if cover and BigWorld.time() - occ_time > OCCLUDER_REFRESH:
+                        occluders = _occluders(target.id, view.pos, foot.center, foot.radius)
+                        occ_time = BigWorld.time()
                     now = Math.Matrix(target.matrix)
                     if max(abs(p - q) for p, q in zip(_pose(now), base_pose)) > 1e-3:
                         drift = Math.Matrix(base_inv)
@@ -1882,9 +1967,8 @@ class XrayOverlay(object):
         GUI.addRoot(c)
         return c
 
-    def publish(self, target, gw, gh, box):
+    def publish(self, target, gw, gh, box, corners, view):
         """Raycast the target and draw a solid-colour silhouette."""
-        view = View()
         sw, sh = GUI.screenResolution()[:2]
         x0, y0 = max(box[0], -1.0), max(box[1], -1.0)
         x1, y1 = min(box[2], 1.0), min(box[3], 1.0)
@@ -1899,13 +1983,9 @@ class XrayOverlay(object):
         left = (x0 + x1) * 0.5 - gw * cw * 0.5
         top = (y0 + y1) * 0.5 + gh * ch * 0.5
 
-        corners = target_corners(target)
-        n = float(len(corners))
-        center_x = sum(c[0] for c in corners) / n
-        center_y = sum(c[1] for c in corners) / n
-        center_z = sum(c[2] for c in corners) / n
-        radius = math.sqrt(max((c[0] - center_x) ** 2 + (c[1] - center_y) ** 2
-                                + (c[2] - center_z) ** 2 for c in corners))
+        foot = Footprint(view, corners, (gw, gh, left, top, cw, ch))
+        center_x, center_y, center_z = foot.center
+        radius = foot.radius
         cx, cy, cz = view.pos
         cam_dist = math.sqrt((center_x - cx) ** 2 + (center_y - cy) ** 2
                               + (center_z - cz) ** 2)
@@ -1931,7 +2011,11 @@ class XrayOverlay(object):
             ny = (top - (j + 0.5) * ch) * tan_y
             ax, ay, az = fx + ux * ny, fy + uy * ny, fz + uz * ny
             row = []
+            inside = foot.row(j)
             for i in xrange(gw):
+                if not inside[i]:
+                    row.append(empty)
+                    continue
                 nx = (left + (i + 0.5) * cw) * tan_x
                 dx, dy, dz = ax + rx * nx, ay + ry * nx, az + rz * nx
                 k = 1.0 / sqrt(dx * dx + dy * dy + dz * dz)
@@ -2035,7 +2119,9 @@ class Heatmap(object):
         self.job = None           # generator of the pass in progress
         self.deadline = 0.0       # time.clock() at which the pass yields the frame
         self.next_pass = 0.0
-        self.last_key = None      # (scene, full grid?, level) of the last finished pass
+        self.last_key = None      # (scene, full grid?, level, seconds it took) of the last
+                                  # finished pass
+        self.last_look = None     # (target id, time, scene) when the next pass was last chosen
         self.mark_comp = None     # the picture of the mark
         self.mark_uv = None       # where the mark is in the target's box: shares of it, from
                                   # the left and from the top
@@ -2073,6 +2159,11 @@ class Heatmap(object):
         self._sec_robin = 0       # round-robin index for time-slicing among secondaries
         self.xrays = {}           # entity id -> XrayOverlay (enemies behind walls)
         self._xray_robin = 0
+        self.frame_no = 0
+        self._primary_seen = None   # (id, corners, box, view) of the target this frame
+        self._scan = {}             # targets on the screen, found once a frame (_on_screen)
+        self._scan_no = -1
+        self._walls = {}            # entity id -> (time, behind a wall?)
         log('v%s loaded; cache=%s' % (__version__, self.cache_dir))
 
     # ---- files ----
@@ -2285,6 +2376,7 @@ class Heatmap(object):
         for ov in self.xrays.values():
             ov.destroy()
         self.xrays.clear()
+        self._walls.clear()
         self._xray_robin = 0
 
     def _xray_active(self):
@@ -2300,33 +2392,32 @@ class Heatmap(object):
         return False
 
     def _hidden_enemies(self, player):
-        """Entity IDs with (entity, corners, box) for enemies behind walls."""
+        """Entity IDs with (entity, corners, box, view) for enemies behind walls. Whether one
+        is behind a wall is looked at again after WALL_PERIOD, not every frame."""
         primary_id = self.target.id if self.target is not None else None
-        view = View()
+        scan = self._on_screen(player)
+        now = BigWorld.time()
+        walls = self._walls
+        for eid in list(walls):
+            if eid not in scan:
+                del walls[eid]
         result = {}
-        try:
-            entities = BigWorld.entities.values()
-        except Exception:
-            return result
-        for entity in entities:
-            if entity.id == primary_id:
+        for eid, item in scan.items():
+            if eid == primary_id:
                 continue
-            if not self._is_target(entity, player):
-                continue
+            entity, view = item[0], item[3]
             # skip allies: xray is for enemies only
             try:
                 if entity.publicInfo['team'] == player.team:
                     continue
             except Exception:
                 continue
-            corners = target_corners(entity)
-            box = view.box(corners)
-            if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
+            wall = walls.get(eid)
+            if wall is None or not 0.0 <= now - wall[0] < WALL_PERIOD:
+                wall = walls[eid] = (now, _is_behind_wall(entity, view))
+            if not wall[1]:
                 continue
-            # check if the entity is behind a wall
-            if not _is_behind_wall(entity, view):
-                continue
-            result[entity.id] = (entity, corners, box, view)
+            result[eid] = item
             if len(result) >= XRAY_MAX:
                 break
         return result
@@ -2365,7 +2456,7 @@ class Heatmap(object):
             ov = self.xrays[tid]
             if now >= ov.next_pass:
                 entity, corners, box, view = hidden[tid]
-                ov.publish(entity, XRAY_GW, XRAY_GH, box)
+                ov.publish(entity, XRAY_GW, XRAY_GH, box, corners, view)
                 ov.next_pass = now + 1.0 / XRAY_RATE
             break
         return True
@@ -2575,8 +2666,9 @@ class Heatmap(object):
             per_disp = distance / (cam_dist * view.tan_y) * 0.5 * sh / cell
             aim = (disp, per_disp, self._mark_cell(box, (left, top, cw, ch)))
         self.job_scene, self.job_fine = scene, level > 0
-        self.job = self._pass(target, view, (gw, gh, left, top, cw, ch), span, box, rules,
-                              full_pp, gun, (scene, full, level), he_result, aim)
+        grid = (gw, gh, left, top, cw, ch)
+        self.job = self._pass(target, view, grid, span, box, rules, full_pp, gun,
+                              (scene, full, level), he_result, aim, Footprint(view, corners, grid))
 
     @staticmethod
     def _dispersion(player):
@@ -2631,10 +2723,12 @@ class Heatmap(object):
             self.logged.add(kind)
             log('no heatmap for %s shells' % kind)
 
-    def _pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result, aim):
+    def _pass(self, target, view, grid, span, box, rules, full_pp, gun, done, he_result, aim,
+              foot):
         """Cast the grid, a slice per frame (yields when self.deadline passes), then publish.
-        done: (scene, full grid?), what self.last_key becomes when the pass ends;
-        aim: (dispersion, cells per unit of it, the cell of the mark on screen) or None."""
+        done: (scene, full grid?, level), what self.last_key becomes when the pass ends;
+        aim: (dispersion, cells per unit of it, the cell of the mark on screen) or None;
+        foot: the target's Footprint on the grid (cells outside it get no ray)."""
         gw, gh, left, top, cw, ch = grid
         t0, t1 = span
         cx, cy, cz = view.pos
@@ -2654,16 +2748,17 @@ class Heatmap(object):
         # when the pass began (so no drift here: the scene does not move with the target)
         cover = bool(self.cfg['hide_covered']) and not self.cover_failed
         scene, space = BigWorld.collideSegment if cover else None, BigWorld.player().spaceID
-        wreck_fns = _collect_wrecks(target.id) if cover else []
-        ally_fns = _collect_allies(target.id) if cover else []
+        occluders = _occluders(target.id, view.pos, foot.center, foot.radius) if cover else []
+        occ_time = BigWorld.time()
         covered_code = COVERED if self.palette[COVERED + PEN][3:] != b'\x00' else None
-        covered_cells = 0
+        covered_cells = outside_cells = 0
         get_mat = target.getMatinfo
         mats = {}
         codes = bytearray(gw * gh)
         done_mask = bytearray(gw * gh)      # 1 = computed or filled by adaptive skip
         plate_cache = {}                     # (hit signature) -> shot code
         V3, sqrt, clock = Math.Vector3, math.sqrt, time.clock
+        row_of = foot.row
         # the rays are laid out for the target as it stood when the pass began; if it drives on
         # during the pass, the rest of them move along with it
         base = Math.Matrix(target.matrix)
@@ -2683,56 +2778,62 @@ class Heatmap(object):
             i = idx % gw
             j = idx // gw
 
-            # ---- adaptive grid: skip the raycast when enough computed neighbours agree ----
-            cat = -1    # category: -1 = none yet; -2 = disagree
-            nbr = -1    # actual code to fill with
-            n_ok = 0
-            if i > 0 and done_mask[idx - 1]:
-                nbr = codes[idx - 1]
-                cat = _GRAD_CAT[nbr]
-                n_ok = 1
-            if i < gw - 1 and done_mask[idx + 1]:
-                nc = codes[idx + 1]
-                ncat = _GRAD_CAT[nc]
-                if n_ok == 0:
-                    nbr = nc
-                    cat = ncat
+            if not row_of(j)[i]:
+                # no part of the target there: the ray would miss
+                fill, nbr = True, MISS
+                outside_cells += 1
+            else:
+                # ---- adaptive grid: skip the raycast when enough computed neighbours agree ----
+                cat = -1    # category: -1 = none yet; -2 = disagree
+                nbr = -1    # actual code to fill with
+                n_ok = 0
+                if i > 0 and done_mask[idx - 1]:
+                    nbr = codes[idx - 1]
+                    cat = _GRAD_CAT[nbr]
                     n_ok = 1
-                elif cat != -2:
-                    if ncat == cat:
-                        n_ok += 1
+                if i < gw - 1 and done_mask[idx + 1]:
+                    nc = codes[idx + 1]
+                    ncat = _GRAD_CAT[nc]
+                    if n_ok == 0:
                         nbr = nc
-                    else:
-                        cat = -2
-            if j > 0 and done_mask[idx - gw]:
-                nc = codes[idx - gw]
-                ncat = _GRAD_CAT[nc]
-                if n_ok == 0:
-                    nbr = nc
-                    cat = ncat
-                    n_ok = 1
-                elif cat != -2:
-                    if ncat == cat:
-                        n_ok += 1
+                        cat = ncat
+                        n_ok = 1
+                    elif cat != -2:
+                        if ncat == cat:
+                            n_ok += 1
+                            nbr = nc
+                        else:
+                            cat = -2
+                if j > 0 and done_mask[idx - gw]:
+                    nc = codes[idx - gw]
+                    ncat = _GRAD_CAT[nc]
+                    if n_ok == 0:
                         nbr = nc
-                    else:
-                        cat = -2
-            if j < gh - 1 and done_mask[idx + gw]:
-                nc = codes[idx + gw]
-                ncat = _GRAD_CAT[nc]
-                if n_ok == 0:
-                    nbr = nc
-                    cat = ncat
-                    n_ok = 1
-                elif cat != -2:
-                    if ncat == cat:
-                        n_ok += 1
+                        cat = ncat
+                        n_ok = 1
+                    elif cat != -2:
+                        if ncat == cat:
+                            n_ok += 1
+                            nbr = nc
+                        else:
+                            cat = -2
+                if j < gh - 1 and done_mask[idx + gw]:
+                    nc = codes[idx + gw]
+                    ncat = _GRAD_CAT[nc]
+                    if n_ok == 0:
                         nbr = nc
-                    else:
-                        cat = -2
+                        cat = ncat
+                        n_ok = 1
+                    elif cat != -2:
+                        if ncat == cat:
+                            n_ok += 1
+                            nbr = nc
+                        else:
+                            cat = -2
+                fill = n_ok >= 2 and cat > 0
 
-            if n_ok >= 2 and cat > 0:
-                # all checked neighbours agree: fill without casting
+            if fill:
+                # filled without casting: outside the target, or all checked neighbours agree
                 codes[idx] = nbr
                 done_mask[idx] = 1
                 n_cells += 1
@@ -2746,9 +2847,9 @@ class Heatmap(object):
                         collide = app.collisions.collideAllWorld
                     except Exception:
                         return
-                    if cover:
-                        wreck_fns = _collect_wrecks(target.id)
-                        ally_fns = _collect_allies(target.id)
+                    if cover and BigWorld.time() - occ_time > OCCLUDER_REFRESH:
+                        occluders = _occluders(target.id, view.pos, foot.center, foot.radius)
+                        occ_time = BigWorld.time()
                     slice_start = clock()
                     frames += 1
                     now = Math.Matrix(target.matrix)
@@ -2776,41 +2877,9 @@ class Heatmap(object):
             hits = collide(a, b)
             if hits:
                 hit_cells += 1
-                # the point the camera sees, and the shot from the gun to it
                 d0 = hits[0][0]
-                hx, hy, hz = sx + dx * d0, sy + dy * d0, sz + dz * d0
-                qx, qy, qz = hx - gun_x, hy - gun_y, hz - gun_z
-                ql = sqrt(qx * qx + qy * qy + qz * qz)
-                code = None
-                if ql > 0.01:
-                    qx /= ql
-                    qy /= ql
-                    qz /= ql
-                    if he_result is not None or dx * qx + dy * qy + dz * qz < PARALLAX_COS:
-                        a = V3(hx - qx * TRACE_BACK, hy - qy * TRACE_BACK, hz - qz * TRACE_BACK)
-                        b = V3(hx + qx * TRACE_FORWARD, hy + qy * TRACE_FORWARD,
-                               hz + qz * TRACE_FORWARD)
-                        if drift is not None:
-                            a, b = drift.applyPoint(a), drift.applyPoint(b)
-                        if he_result is not None:
-                            details = target.collideSegmentExt(a, b)
-                            code = NO_PEN
-                            if details:
-                                code = HE_CODES.get(int(he_result(
-                                    details, full_pp, shell, min_pp, max_pp, target)), NO_PEN)
-                        else:
-                            shot_hits = collide(a, b)
-                            if shot_hits:
-                                hits = shot_hits
-                if code is None:
-                    # ---- per-plate cache: quantised hit signature -> shot code ----
-                    hk = tuple((h[3], h[2], int(h[1] * 40)) for h in hits)
-                    cached = plate_cache.get(hk)
-                    if cached is not None:
-                        code = cached
-                    else:
-                        code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
-                        plate_cache[hk] = code
+                # cover first: a cell hidden and not drawn needs no shell
+                hidden = False
                 if cover:
                     seen = t0 + d0 - COVER_GAP    # meters from the camera
                     if seen > 1.0:
@@ -2826,24 +2895,55 @@ class Heatmap(object):
                             log('cover test failed, the map shows through cover',
                                 traceback.format_exc())
                         if not hidden:
-                            for wfn in wreck_fns:
+                            for fn in occluders:
                                 try:
-                                    if wfn(cam_a, cam_b):
+                                    if fn(cam_a, cam_b):
                                         hidden = True
                                         break
                                 except Exception:
                                     pass
-                        if not hidden:
-                            for afn in ally_fns:
-                                try:
-                                    if afn(cam_a, cam_b):
-                                        hidden = True
-                                        break
-                                except Exception:
-                                    pass
-                        if hidden:
-                            covered_cells += 1
-                            code = MISS if covered_code is None else code | covered_code
+                if hidden:
+                    covered_cells += 1
+                if hidden and covered_code is None:
+                    code = MISS
+                else:
+                    # the point the camera sees, and the shot from the gun to it
+                    hx, hy, hz = sx + dx * d0, sy + dy * d0, sz + dz * d0
+                    qx, qy, qz = hx - gun_x, hy - gun_y, hz - gun_z
+                    ql = sqrt(qx * qx + qy * qy + qz * qz)
+                    code = None
+                    if ql > 0.01:
+                        qx /= ql
+                        qy /= ql
+                        qz /= ql
+                        if he_result is not None or dx * qx + dy * qy + dz * qz < PARALLAX_COS:
+                            a = V3(hx - qx * TRACE_BACK, hy - qy * TRACE_BACK,
+                                   hz - qz * TRACE_BACK)
+                            b = V3(hx + qx * TRACE_FORWARD, hy + qy * TRACE_FORWARD,
+                                   hz + qz * TRACE_FORWARD)
+                            if drift is not None:
+                                a, b = drift.applyPoint(a), drift.applyPoint(b)
+                            if he_result is not None:
+                                details = target.collideSegmentExt(a, b)
+                                code = NO_PEN
+                                if details:
+                                    code = HE_CODES.get(int(he_result(
+                                        details, full_pp, shell, min_pp, max_pp, target)), NO_PEN)
+                            else:
+                                shot_hits = collide(a, b)
+                                if shot_hits:
+                                    hits = shot_hits
+                    if code is None:
+                        # ---- per-plate cache: quantised hit signature -> shot code ----
+                        hk = tuple((h[3], h[2], int(h[1] * 40)) for h in hits)
+                        cached = plate_cache.get(hk)
+                        if cached is not None:
+                            code = cached
+                        else:
+                            code = shot_code(hits, mats, get_mat, full_pp, rules, lo, hi)
+                            plate_cache[hk] = code
+                    if hidden:
+                        code |= covered_code
                 codes[idx] = code
             done_mask[idx] = 1
             n_cells += 1
@@ -2858,9 +2958,9 @@ class Heatmap(object):
                     collide = app.collisions.collideAllWorld
                 except Exception:
                     return
-                if cover:
-                    wreck_fns = _collect_wrecks(target.id)
-                    ally_fns = _collect_allies(target.id)
+                if cover and BigWorld.time() - occ_time > OCCLUDER_REFRESH:
+                    occluders = _occluders(target.id, view.pos, foot.center, foot.radius)
+                    occ_time = BigWorld.time()
                 slice_start = clock()
                 frames += 1
                 now = Math.Matrix(target.matrix)
@@ -2887,7 +2987,8 @@ class Heatmap(object):
             self.mark_disp = aim[0]
             self.grid = (codes, gw, gh, left, top, cw, ch, box, aim[1])
         self._publish(target, codes, gw, gh, (left, top, gw * cw, gh * ch), box, mark)
-        self.last_key = done
+        took = max(BigWorld.time() - self.pass_start, 1e-3)
+        self.last_key = done + (took,)
         self.passes += 1
         work += clock() - slice_start
         # the cost of a cell on this computer, for sizing the fast passes: follow it, but do
@@ -2898,7 +2999,6 @@ class Heatmap(object):
         else:
             self.cost = sample
         self.cost_dirty = True
-        took = max(BigWorld.time() - self.pass_start, 1e-3)
         fine = self.job_fine
         if not fine:
             # fast passes follow each other as often as asked for, if they take no longer
@@ -2911,10 +3011,11 @@ class Heatmap(object):
         kind = 'fine pass' if done[1] else 'refine pass' if fine else 'fast pass'
         if self.cfg['debug'] or kind not in self.logged:
             self.logged.add(kind)
-            log('%s %d: %s grid %dx%d, %d cells on armor, %d of them behind cover, %s pen '
-                '%.0f mm, %.1f ms of work in %d frames, %.2f s; a cell costs %.1f us'
-                % (kind, self.passes, target.typeDescriptor.type.name, gw, gh, hit_cells,
-                   covered_cells, shell.kind, full_pp, work * 1000.0, frames, took,
+            log('%s %d: %s grid %dx%d, %d cells outside the parts, %d cells on armor, %d of them '
+                'behind cover, %s pen %.0f mm, %.1f ms of work in %d frames, %.2f s; a cell '
+                'costs %.1f us'
+                % (kind, self.passes, target.typeDescriptor.type.name, gw, gh, outside_cells,
+                   hit_cells, covered_cells, shell.kind, full_pp, work * 1000.0, frames, took,
                    self.cost * 1e6))
             if self.passes == 1:
                 log(self._resolution_text())
@@ -2941,6 +3042,8 @@ class Heatmap(object):
                 base = max(0.0005, dt - self.mod_time)
                 self.base_dt = base if self.base_dt is None else self.base_dt * 0.8 + base * 0.2
         self.last_frame = now
+        self.frame_no += 1
+        self._primary_seen = None
         target = self._pick_target(player, now)
         if target is not None:
             view = View()
@@ -2952,6 +3055,7 @@ class Heatmap(object):
                 self.cur_box = None
                 self._hide()
             else:
+                self._primary_seen = (target.id, corners, box, view)
                 self.cur_box = box
                 if self.pic is not None and self.pic[0] == target.id:
                     self._place(box)
@@ -2971,14 +3075,25 @@ class Heatmap(object):
                         level = 0
                     elif scene_moved(done[0], scene):
                         # a small change: the same sharpness again, the picture on the screen
-                        # stays meanwhile; refining further would not keep up with it
+                        # stays meanwhile; refining further would not keep up with it. But if
+                        # the camera or the target is on the move (it went past the still
+                        # limits since the last look, by the time that pass takes), that pass
+                        # would be dropped half way: a fast one
                         level = done[2]
+                        look = self.last_look
+                        took = done[3] if len(done) > 3 else 0.0
+                        if look is not None and look[0] == target.id and took > 0.0:
+                            dt = now - look[1]
+                            if dt > 0.0 and scene_moved(look[2], scene,
+                                                        max(1.0, LOOSE * dt / took), False):
+                                level = 0
                     elif not done[1]:
                         level = done[2] + 1
                     elif box_drifted(done[0][5], box):
                         level = done[2]
                     else:
                         level = None
+                    self.last_look = (target.id, now, scene)
                     if level is None:
                         self.next_pass = now + STILL_CHECK_PERIOD
                         if self.grid is not None and self.mark_disp > 0.0:
@@ -3019,47 +3134,50 @@ class Heatmap(object):
             return 0.0
         return IDLE_PERIOD
 
-    def _count_on_screen(self, player, view):
-        """How many enemy vehicles are on the screen right now (cheap, no corner/box stored)."""
-        count = 0
-        try:
-            entities = BigWorld.entities.values()
-        except Exception:
-            return 1       # assume at least the primary target
-        for entity in entities:
-            try:
-                if not self._is_target(entity, player):
-                    continue
-                corners = target_corners(entity)
-                box = view.box(corners)
-                if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
-                    continue
-                count += 1
-                if count > FOCUS_FEW:
-                    return count    # no point counting further
-            except Exception:
-                pass   # one bad entity must not break the whole count
-        return max(count, 1)
-
-    def _visible_enemies(self, player):
-        """Entity IDs with (entity, corners, box) for enemies on screen now."""
-        primary_id = self.target.id if self.target is not None else None
-        view = View()
+    def _on_screen(self, player):
+        """{id: (entity, corners, box, view)} of the targets on the screen this frame, the
+        aimed one too. Found once a frame and shared by the focus count, the secondary maps
+        and the xray silhouettes."""
+        if self._scan_no == self.frame_no:
+            return self._scan
+        seen = self._primary_seen
+        view = None
         result = {}
         try:
             entities = BigWorld.entities.values()
         except Exception:
-            return result
+            entities = []
         for entity in entities:
-            if entity.id == primary_id:
+            try:
+                if not self._is_target(entity, player):
+                    continue
+                if seen is not None and seen[0] == entity.id:
+                    corners, box, v = seen[1], seen[2], seen[3]
+                else:
+                    if view is None:
+                        view = View()
+                    corners, v = target_corners(entity), view
+                    box = view.box(corners)
+                if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
+                    continue
+                result[entity.id] = (entity, corners, box, v)
+            except Exception:
+                continue   # a vehicle that is just leaving the world
+        self._scan, self._scan_no = result, self.frame_no
+        return result
+
+    def _count_on_screen(self, player, view):
+        """How many target vehicles are on the screen right now, the aimed one too."""
+        return max(len(self._on_screen(player)), 1)
+
+    def _visible_enemies(self, player):
+        """Entity IDs with (entity, corners, box, view) for the other targets on screen now."""
+        primary_id = self.target.id if self.target is not None else None
+        result = {}
+        for eid, item in self._on_screen(player).items():
+            if eid == primary_id:
                 continue
-            if not self._is_target(entity, player):
-                continue
-            corners = target_corners(entity)
-            box = view.box(corners)
-            if box is None or box[2] < -1.0 or box[0] > 1.0 or box[3] < -1.0 or box[1] > 1.0:
-                continue
-            result[entity.id] = (entity, corners, box, view)
+            result[eid] = item
             if len(result) >= MAX_SECONDARY:
                 break
         return result
